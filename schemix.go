@@ -13,47 +13,130 @@ import (
 // cueField is a pre-compiled field descriptor extracted at schema parse time.
 // This avoids calling schema.Fields() on every Process call (optimization #3).
 type cueField struct {
-	name     string    // field name (without "?")
-	path     string    // full dot-separated path
-	schema   cue.Value // pre-resolved schema value
-	optional bool      // whether the field is optional
-	hasBlob  bool      // has @blob attribute — skip CUE validation (optimization #1)
-	isStruct bool      // IncompleteKind == StructKind
-	isList   bool      // IncompleteKind == ListKind
-	children []cueField // nested struct fields (pre-compiled recursively)
+	name     string          // field name (without "?")
+	path     string          // full dot-separated path
+	schema   cue.Value       // pre-resolved schema value
+	optional bool            // whether the field is optional
+	hasBlob  bool            // has @blob attribute — skip CUE validation (optimization #1)
+	isStruct bool            // IncompleteKind == StructKind
+	isList   bool            // IncompleteKind == ListKind
+	fast     *fastConstraint // Go-native fast check (nil = use CUE path)
+	children []cueField      // nested struct fields (pre-compiled recursively)
 }
 
 // Validator is a schema-driven validation and transformation engine.
 // It combines CUE static constraints with Bloblang dynamic expressions,
 // supporting recursive multi-level validation, structured error codes,
 // and configurable fail strategies.
+//
+// Validator is safe for concurrent use after construction.
 type Validator struct {
-	ctx       *cue.Context
-	schema    cue.Value
-	blobRules []blobRule
-	cueFields []cueField // pre-compiled field descriptors for fast runtime validation
+	ctx            *cue.Context
+	schema         cue.Value
+	blobRules      []blobRule
+	cueFields      []cueField           // pre-compiled field descriptors for fast runtime validation
+	errorFormatter ErrorFormatter        // optional custom error message formatter
+	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
+}
+
+// formatMessage returns the user-facing error message. If an ErrorFormatter is
+// configured, it delegates to the formatter; otherwise returns the default detail.
+func (v *Validator) formatMessage(code ErrorCode, path, detail string) string {
+	if v.errorFormatter != nil {
+		return v.errorFormatter(code, path, detail)
+	}
+	return detail
+}
+
+// parseBloblang compiles a Bloblang mapping string using the Validator's
+// isolated environment (if one exists) or the global environment.
+func (v *Validator) parseBloblang(mapping string) (*bloblang.Executor, error) {
+	if v.blobEnv != nil {
+		return v.blobEnv.Parse(mapping)
+	}
+	return bloblang.Parse(mapping)
+}
+
+// buildBlobEnv creates an isolated Bloblang environment with built-in
+// validators and any user-registered custom functions/methods.
+func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
+	env := bloblang.NewEnvironment()
+
+	// Register built-in validation methods and functions
+	if err := registerBuiltins(env); err != nil {
+		return nil, fmt.Errorf("register builtins: %w", err)
+	}
+
+	// Register user custom functions/methods
+	for _, entry := range cfg.customFuncs {
+		var regErr error
+		switch entry.kind {
+		case kindFuncV1:
+			regErr = env.RegisterFunction(entry.name, entry.funcV1)
+		case kindFuncV2:
+			regErr = env.RegisterFunctionV2(entry.name, entry.spec, entry.funcV2)
+		case kindMethodV1:
+			regErr = env.RegisterMethod(entry.name, entry.methodV1)
+		case kindMethodV2:
+			regErr = env.RegisterMethodV2(entry.name, entry.spec, entry.methodV2)
+		}
+		if regErr != nil {
+			return nil, fmt.Errorf("register %q: %w", entry.name, regErr)
+		}
+	}
+
+	return env, nil
+}
+
+// registerBuiltins registers all schemix built-in validation methods and functions
+// into the given Bloblang environment.
+func registerBuiltins(env *bloblang.Environment) error {
+	for _, m := range builtinMethods() {
+		if err := env.RegisterMethodV2(m.name, m.spec, m.ctor); err != nil {
+			return err
+		}
+	}
+	for _, f := range builtinFunctions() {
+		if err := env.RegisterFunctionV2(f.name, f.spec, f.ctor); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // New creates a Validator from a CUE schema string.
 // The schema may use @blob() for dynamic expressions and @meta() for field controls.
-func New(cueSrc string) (*Validator, error) {
+func New(cueSrc string, opts ...Option) (*Validator, error) {
 	ctx := cuecontext.New()
-	return NewWithContext(ctx, cueSrc)
+	return NewWithContext(ctx, cueSrc, opts...)
 }
 
 // NewWithContext creates a Validator from a CUE schema string using a shared
 // CUE context. This is more efficient when creating many validators, as they
 // can share compilation state.
-func NewWithContext(ctx *cue.Context, cueSrc string) (*Validator, error) {
+func NewWithContext(ctx *cue.Context, cueSrc string, opts ...Option) (*Validator, error) {
 	schema := ctx.CompileString(cueSrc)
 	if err := schema.Err(); err != nil {
 		return nil, fmt.Errorf("CUE compile error: %w", err)
 	}
 
-	v := &Validator{
-		ctx:    ctx,
-		schema: schema,
+	cfg := &validatorConfig{}
+	for _, opt := range opts {
+		opt(cfg)
 	}
+
+	v := &Validator{
+		ctx:            ctx,
+		schema:         schema,
+		errorFormatter: cfg.errorFormatter,
+	}
+
+	// Create isolated Bloblang environment with builtins + custom functions
+	env, err := buildBlobEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	v.blobEnv = env
 
 	if err := v.extractRules(schema, ""); err != nil {
 		return nil, err
@@ -69,12 +152,105 @@ func NewWithContext(ctx *cue.Context, cueSrc string) (*Validator, error) {
 
 // MustNew is like New but panics on error. Useful for package-level
 // initialization with schema literals.
-func MustNew(cueSrc string) *Validator {
-	v, err := New(cueSrc)
+func MustNew(cueSrc string, opts ...Option) *Validator {
+	v, err := New(cueSrc, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("schemix.MustNew: %v", err))
 	}
 	return v
+}
+
+// NewFromValue creates a Validator from a pre-compiled CUE value.
+// This enables schema composition by allowing users to build complex schemas
+// using CUE's native import/definition mechanisms and pass the result directly.
+//
+// Example:
+//
+//	ctx := cuecontext.New()
+//	defs := ctx.CompileString(`#PAN: =~"^[0-9]{16}$"`)
+//	schema := ctx.CompileString(`{ pan: #PAN, amount: int & >0 }`, cue.Scope(defs))
+//	v, err := schemix.NewFromValue(schema)
+func NewFromValue(schema cue.Value, opts ...Option) (*Validator, error) {
+	if err := schema.Err(); err != nil {
+		return nil, fmt.Errorf("CUE value error: %w", err)
+	}
+
+	cfg := &validatorConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	v := &Validator{
+		ctx:            schema.Context(),
+		schema:         schema,
+		errorFormatter: cfg.errorFormatter,
+	}
+
+	// Create isolated Bloblang environment with builtins + custom functions
+	env, err := buildBlobEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	v.blobEnv = env
+
+	if err := v.extractRules(schema, ""); err != nil {
+		return nil, err
+	}
+
+	sortblobRules(v.blobRules)
+	v.cueFields = compileCUEFields(schema, "")
+
+	return v, nil
+}
+
+// Fields returns the schema's field descriptors for runtime introspection.
+// This is useful for generating documentation, API specs, or UI forms.
+func (v *Validator) Fields() []FieldInfo {
+	return convertCUEFields(v.cueFields)
+}
+
+// convertCUEFields recursively converts internal cueField descriptors to exported FieldInfo.
+func convertCUEFields(fields []cueField) []FieldInfo {
+	if len(fields) == 0 {
+		return []FieldInfo{}
+	}
+	result := make([]FieldInfo, len(fields))
+	for i := range fields {
+		f := &fields[i]
+		result[i] = FieldInfo{
+			Name:     f.name,
+			Path:     f.path,
+			Type:     cueKindToString(f.schema.IncompleteKind()),
+			Optional: f.optional,
+			HasBlob:  f.hasBlob,
+		}
+		if len(f.children) > 0 {
+			result[i].Children = convertCUEFields(f.children)
+		}
+	}
+	return result
+}
+
+// cueKindToString maps a CUE IncompleteKind to a human-readable type string.
+func cueKindToString(k cue.Kind) string {
+	switch k {
+	case cue.StringKind:
+		return "string"
+	case cue.IntKind:
+		return "int"
+	case cue.FloatKind:
+		return "float"
+	case cue.NumberKind:
+		return "number"
+	case cue.BoolKind:
+		return "bool"
+	case cue.StructKind:
+		return "struct"
+	case cue.ListKind:
+		return "list"
+	default:
+		return "unknown"
+	}
 }
 
 // compileCUEFields recursively extracts field metadata at compile time.
@@ -100,11 +276,27 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 
 		blobAttr := fieldSchema.Attribute(attrBlob)
 
+		// Check if @meta marks the field as optional/conditional
+		isOptional := iter.IsOptional()
+		if !isOptional {
+			metaAttr := fieldSchema.Attribute(attrMeta)
+			if metaAttr.Err() == nil {
+				for i := range metaAttr.NumArgs() {
+					key, _ := metaAttr.Arg(i)
+					key = strings.TrimSpace(key)
+					if key == metaOptional || key == metaConditional {
+						isOptional = true
+						break
+					}
+				}
+			}
+		}
+
 		f := cueField{
 			name:     name,
 			path:     fullPath,
 			schema:   fieldSchema,
-			optional: iter.IsOptional(),
+			optional: isOptional,
 			hasBlob:  blobAttr.Err() == nil,
 			isStruct: fieldSchema.IncompleteKind() == cue.StructKind,
 			isList:   fieldSchema.IncompleteKind() == cue.ListKind,
@@ -113,6 +305,11 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 		// Recursively compile nested struct fields
 		if f.isStruct {
 			f.children = compileCUEFields(fieldSchema, fullPath)
+		}
+
+		// Optimization #4: extract Go-native fast constraint for scalar fields
+		if !f.hasBlob && !f.isStruct && !f.isList {
+			f.fast = extractFastConstraint(fieldSchema)
 		}
 
 		fields = append(fields, f)
@@ -142,7 +339,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 			fullPath = prefix + "." + fieldName
 		}
 
-		meta := parsefieldMeta(fieldValue)
+		meta := parsefieldMeta(fieldValue, v.parseBloblang)
 		if isOptional {
 			meta.Optional = true
 		}
@@ -157,7 +354,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 					continue
 				}
 				mapping := fmt.Sprintf(blobMappingTemplate, expr)
-				exec, err := bloblang.Parse(mapping)
+				exec, err := v.parseBloblang(mapping)
 				if err != nil {
 					return fmt.Errorf("field %q @blob(%s) compile error: %w", fullPath, expr, err)
 				}
@@ -191,8 +388,9 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 }
 
 // Validate performs validation only and returns (valid, errors).
+// Unlike Process, it skips deepCopy and Output construction for better performance.
 func (v *Validator) Validate(data map[string]any) (bool, []ValidationError) {
-	r := v.Process(data)
+	r := v.processInternal(data, FailAll, false)
 	return r.Valid, r.Errors
 }
 
@@ -203,10 +401,19 @@ func (v *Validator) Process(data map[string]any) Result {
 
 // ProcessWithMode performs validation and value computation with the specified FailMode.
 func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
+	return v.processInternal(data, mode, true)
+}
+
+// processInternal is the unified validation/processing engine.
+// When needOutput is false, it skips deepCopy and all Output mutations for performance.
+func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) Result {
 	result := Result{
 		Valid:  true,
 		Errors: []ValidationError{},
-		Output: deepCopy(data),
+	}
+
+	if needOutput {
+		result.Output = deepCopy(data)
 	}
 
 	// Layer 1: CUE validation using pre-compiled field descriptors
@@ -250,7 +457,7 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 		if meta.SkipIf != nil {
 			if res, err := meta.SkipIf.Query(data); err == nil {
 				if skip, ok := res.(bool); ok && skip {
-					if meta.OmitIfSkip {
+					if meta.OmitIfSkip && result.Output != nil {
 						deleteNestedKey(result.Output, rule.Path)
 					}
 					continue
@@ -264,31 +471,32 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 
 		// skip_empty
 		if meta.SkipEmpty && fieldEmpty {
-			if meta.OmitIfSkip || meta.OmitEmpty {
+			if (meta.OmitIfSkip || meta.OmitEmpty) && result.Output != nil {
 				deleteNestedKey(result.Output, rule.Path)
 			}
 			continue
 		}
 
 		// omit_empty
-		if meta.OmitEmpty && fieldEmpty {
+		if meta.OmitEmpty && fieldEmpty && result.Output != nil {
 			deleteNestedKey(result.Output, rule.Path)
 		}
 
 		// optional + required_if
 		if meta.Optional && fieldVal == nil {
-			if meta.OmitEmpty {
+			if meta.OmitEmpty && result.Output != nil {
 				deleteNestedKey(result.Output, rule.Path)
 			}
 			if meta.RequiredIf != nil {
 				if res, err := meta.RequiredIf.Query(data); err == nil {
 					if required, ok := res.(bool); ok && required {
+						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
 							Code:    CodeCondRequired,
 							Path:    rule.Path,
 							Type:    TypeMeta,
-							Message: fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr),
+							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
 						})
 						failedPaths[rule.Path] = true
 						priorityHasError = true
@@ -306,12 +514,13 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 			if meta.RequiredIf != nil {
 				if res, err := meta.RequiredIf.Query(data); err == nil {
 					if required, ok := res.(bool); ok && required {
+						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
 							Code:    CodeCondRequired,
 							Path:    rule.Path,
 							Type:    TypeMeta,
-							Message: fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr),
+							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
 						})
 						failedPaths[rule.Path] = true
 						priorityHasError = true
@@ -328,12 +537,13 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 		if rule.Exec != nil {
 			res, err := rule.Exec.Query(data)
 			if err != nil {
+				detail := fmt.Sprintf("expression error: %v", err)
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Code:    CodeExprExecError,
 					Path:    rule.Path,
 					Type:    TypeBloblang,
-					Message: fmt.Sprintf("expression error: %v", err),
+					Message: v.formatMessage(CodeExprExecError, rule.Path, detail),
 				})
 				failedPaths[rule.Path] = true
 				priorityHasError = true
@@ -345,12 +555,13 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 
 			if valid, ok := res.(bool); ok {
 				if !valid {
+					detail := fmt.Sprintf("failed: %s", rule.Expr)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    CodeBizRuleFailed,
 						Path:    rule.Path,
 						Type:    TypeBloblang,
-						Message: fmt.Sprintf("failed: %s", rule.Expr),
+						Message: v.formatMessage(CodeBizRuleFailed, rule.Path, detail),
 					})
 					failedPaths[rule.Path] = true
 					priorityHasError = true
@@ -359,8 +570,10 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 					}
 				}
 			} else {
-				// Value mode: write computed result to output
-				setNestedValue(result.Output, rule.Path, res)
+				// Value mode: write computed result to output only when needed
+				if result.Output != nil {
+					setNestedValue(result.Output, rule.Path, res)
+				}
 			}
 		}
 	}
@@ -385,7 +598,38 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 		// Optimization #2: fast Go-level existence check before touching CUE
 		// Use field name (not full path) since rawData is the current level map
 		goVal, exists := rawData[f.name]
-		if !exists || goVal == nil {
+		if !exists {
+			// Field is truly missing from input data
+			if !f.optional && !f.hasBlob {
+				detail := fmt.Sprintf("required field %q is missing", f.name)
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    CodeRequiredMissing,
+					Path:    f.path,
+					Type:    TypeCUE,
+					Message: v.formatMessage(CodeRequiredMissing, f.path, detail),
+				})
+			}
+			continue
+		}
+		if goVal == nil {
+			// Field exists but value is nil — let CUE validate nullability
+			// (e.g. `null | string` schemas allow nil)
+			continue
+		}
+
+		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
+		if f.fast != nil {
+			valid, code, detail := validateFast(f.fast, goVal)
+			if !valid {
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    code,
+					Path:    f.path,
+					Type:    TypeCUE,
+					Message: v.formatMessage(code, f.path, detail),
+				})
+			}
 			continue
 		}
 
@@ -410,16 +654,17 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			if err := listUnified.Validate(cue.Concrete(true)); err != nil {
 				cueErrs := cueerrors.Errors(err)
 				for _, e := range cueErrs {
-					code := classifyCUEError(e.Error())
+					code := classifyCUEErrorStructured(e)
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
+					ePath := f.path + "." + extractIndex(e.Error())
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,
-						Path:    f.path + "." + extractIndex(e.Error()),
+						Path:    ePath,
 						Type:    TypeCUE,
-						Message: e.Error(),
+						Message: v.formatMessage(code, ePath, e.Error()),
 					})
 				}
 			}
@@ -432,12 +677,13 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			if !f.optional {
 				cueErrs := cueerrors.Errors(err)
 				for _, e := range cueErrs {
+					code := classifyCUEErrorStructured(e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
-						Code:    classifyCUEError(e.Error()),
+						Code:    code,
 						Path:    f.path,
 						Type:    TypeCUE,
-						Message: e.Error(),
+						Message: v.formatMessage(code, f.path, e.Error()),
 					})
 				}
 			}
@@ -484,12 +730,13 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 			if !isOptional {
 				cueErrs := cueerrors.Errors(err)
 				for _, e := range cueErrs {
+					code := classifyCUEErrorStructured(e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
-						Code:    classifyCUEError(e.Error()),
+						Code:    code,
 						Path:    fullPath,
 						Type:    TypeCUE,
-						Message: e.Error(),
+						Message: v.formatMessage(code, fullPath, e.Error()),
 					})
 				}
 			}
@@ -507,16 +754,17 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 			if err := listUnified.Validate(cue.Concrete(true)); err != nil {
 				cueErrs := cueerrors.Errors(err)
 				for _, e := range cueErrs {
-					code := classifyCUEError(e.Error())
+					code := classifyCUEErrorStructured(e)
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
+					ePath := fullPath + "." + extractIndex(e.Error())
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,
-						Path:    fullPath + "." + extractIndex(e.Error()),
+						Path:    ePath,
 						Type:    TypeCUE,
-						Message: e.Error(),
+						Message: v.formatMessage(code, ePath, e.Error()),
 					})
 				}
 			}
