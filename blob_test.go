@@ -3,7 +3,7 @@ package schemix
 import (
 	"testing"
 
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // helper: compile bloblang mapping and execute against data.

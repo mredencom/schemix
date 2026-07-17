@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/mredencom/schemix"
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // Simulated external services

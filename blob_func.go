@@ -3,7 +3,7 @@ package schemix
 import (
 	"time"
 
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // builtinFunctions returns all built-in validation functions to register.
