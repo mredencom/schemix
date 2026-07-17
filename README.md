@@ -27,16 +27,17 @@ graph TD
 
     subgraph Compile Time
         CUE & BLOB & META --> FD[Pre-compiled Field Descriptors]
+        FD --> FP[Go Fast Path<br/>type / regex / range / enum]
     end
 
     subgraph Runtime
-        FD --> ENGINE[Execution Engine]
+        FP --> ENGINE[Execution Engine]
         ENGINE --> FA[FailAll<br/>collect all]
         ENGINE --> FF[FailFast<br/>stop at first]
-        ENGINE --> FP[FailPriority<br/>group isolation]
+        ENGINE --> FPR[FailPriority<br/>group isolation]
     end
 
-    FA & FF & FP --> RESULT[Result<br/>Valid · Output · Errors]
+    FA & FF & FPR --> RESULT[Result<br/>Valid · Output · Errors]
 ```
 
 ## Table of Contents
@@ -44,8 +45,14 @@ graph TD
 - [Features](#features)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Built-in Validators](#built-in-validators)
 - [API Validation](#api-validation)
 - [Schema Syntax](#schema-syntax)
+- [Custom Functions & Methods](#custom-functions--methods)
+- [Error Handling](#error-handling)
+- [Custom Error Messages](#custom-error-messages)
+- [Schema Composition](#schema-composition)
+- [Schema Introspection](#schema-introspection)
 - [FailMode](#failmode)
 - [Error Codes](#error-codes)
 - [Bloblang Integration](#bloblang-integration)
@@ -60,12 +67,15 @@ graph TD
 |----------|-------------|
 | **Constraints** | Types, regex, enums, ranges, nested structs, arrays `[...{schema}]`, nullable `null \| type` |
 | **Dynamic Rules** | Bloblang expressions — return `bool` for validation, other types for computed values |
+| **Built-in Validators** | 37+ methods: email, URL, UUID, IP, Luhn, JSON, Base64, mobile, length, range... |
+| **Custom Functions** | Register your own functions/methods with Bloblang-compatible API (V1 & V2 styles) |
 | **Field Control** | Priority groups, conditional required/skip, omit empty, fail-fast per field |
 | **Execution** | Three FailModes — collect all / stop at first / priority-group isolation |
-| **Performance** | Pre-compiled field descriptors, skip @blob fields in CUE layer, Go-level fast checks |
+| **Performance** | Go-native fast path for scalar fields (2.5µs/op), pre-compiled descriptors |
+| **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType), custom i18n formatter |
+| **Composition** | Schema reuse via CUE definitions + `NewFromValue`, runtime introspection |
 | **Integration** | Method & function forms for Benthos/Redpanda Connect pipelines |
-| **Management** | Thread-safe registry with Has/Unregister/List/Len, shared CUE context |
-| **Error Handling** | Structured `E{layer}{category}{seq}` codes, `error` interface, path-based filtering |
+| **Thread Safety** | Validator immutable after construction; Registry uses RWMutex |
 
 ## Install
 
@@ -83,19 +93,96 @@ v, err := schemix.New(`{
     amount:   int & >0
     currency: "156" | "840"
 
+    // Built-in validators
+    luhn:       bool   @blob(this.pan.luhn_valid())
     pan_check:  bool   @blob(this.pan.has_prefix("62") || this.pan.has_prefix("4"))
+
+    // Computed fields
     card_brand: string @blob(if this.pan.has_prefix("62") { "UnionPay" } else { "Visa" })
     fee:        number @blob(if this.currency == "156" { 0 } else { (this.amount * 0.015).ceil() })
 }`)
 
 r := v.Process(map[string]any{
-    "pan": "6222021234567890", "amount": int64(10000), "currency": "156",
+    "pan": "4111111111111111", "amount": int64(10000), "currency": "840",
 })
 
 r.Valid                // true
-r.Output["card_brand"] // "UnionPay"
-r.Output["fee"]        // 0
+r.Output["card_brand"] // "Visa"
+r.Output["fee"]        // 150
 ```
+
+## Built-in Validators
+
+All methods are available automatically in `@blob()` expressions — no registration needed.
+
+### String Format
+
+| Method | Usage | Description |
+|--------|-------|-------------|
+| `is_email()` | `this.email.is_email()` | Email address format |
+| `is_url()` | `this.link.is_url()` | URL with scheme |
+| `is_full_url()` | `this.cb.is_full_url()` | Must start with http/https |
+| `is_uuid()` | `this.id.is_uuid()` | UUID any version |
+| `is_uuid3/4/5()` | `this.id.is_uuid4()` | Specific UUID version |
+| `is_ip()` | `this.host.is_ip()` | IPv4 or IPv6 |
+| `is_ipv4()` / `is_ipv6()` | `this.ip.is_ipv4()` | Specific IP version |
+| `is_cidr()` | `this.net.is_cidr()` | CIDR notation |
+| `is_mac()` | `this.mac.is_mac()` | MAC address |
+| `is_dns_name()` | `this.host.is_dns_name()` | DNS hostname |
+| `is_json()` | `this.body.is_json()` | Valid JSON string |
+| `is_base64()` | `this.token.is_base64()` | Base64 encoded |
+| `is_hex()` | `this.hash.is_hex()` | Hexadecimal string |
+| `is_hex_color()` | `this.color.is_hex_color()` | #RGB or #RRGGBB |
+| `is_rgb_color()` | `this.color.is_rgb_color()` | rgb(r,g,b) |
+| `is_data_uri()` | `this.img.is_data_uri()` | data:mime;base64,... |
+| `is_latitude()` | `this.lat.is_latitude()` | -90 to 90 |
+| `is_longitude()` | `this.lng.is_longitude()` | -180 to 180 |
+| `is_isbn10/13()` | `this.isbn.is_isbn13()` | ISBN format |
+| `is_cn_mobile()` | `this.phone.is_cn_mobile()` | China mobile (1xx) |
+
+### Character Type
+
+| Method | Usage | Description |
+|--------|-------|-------------|
+| `is_alpha()` | `this.name.is_alpha()` | Letters only |
+| `is_alpha_num()` | `this.code.is_alpha_num()` | Letters + digits |
+| `is_alpha_dash()` | `this.slug.is_alpha_dash()` | Letters + digits + `-_` |
+| `is_numeric()` | `this.pin.is_numeric()` | Digits only (0-9) |
+| `is_number()` | `this.val.is_number()` | Number string (±, decimal) |
+| `is_ascii()` | `this.s.is_ascii()` | ASCII only |
+| `is_printable_ascii()` | `this.s.is_printable_ascii()` | Printable ASCII (32-126) |
+| `is_multibyte()` | `this.s.is_multibyte()` | Contains multibyte chars |
+
+### String Checks
+
+| Method | Usage | Description |
+|--------|-------|-------------|
+| `not_blank()` | `this.name.not_blank()` | Not empty/whitespace |
+| `has_whitespace()` | `this.s.has_whitespace()` | Contains whitespace |
+
+### Length & Range
+
+| Method | Usage | Description |
+|--------|-------|-------------|
+| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | String/slice/map length |
+| `min_len(n)` | `this.s.min_len(n: 3)` | Minimum length |
+| `max_len(n)` | `this.s.max_len(n: 100)` | Maximum length |
+| `str_len(min,max)` | `this.s.str_len(min:2, max:10)` | Rune count range |
+| `between(min,max)` | `this.age.between(min:0, max:150)` | Numeric range (inclusive) |
+
+### Financial
+
+| Method | Usage | Description |
+|--------|-------|-------------|
+| `luhn_valid()` | `this.pan.luhn_valid()` | Luhn checksum (card numbers) |
+
+### Date Functions
+
+| Function | Usage | Description |
+|----------|-------|-------------|
+| `is_valid_date(d)` | `is_valid_date(this.date)` | Parseable date string |
+| `is_past_date(d)` | `is_past_date(this.birthday)` | Date is in the past |
+| `is_future_date(d)` | `is_future_date(this.expiry)` | Date is in the future |
 
 ## API Validation
 
@@ -104,10 +191,11 @@ Pre-compile at startup, validate per request with zero compilation overhead:
 ```go
 var userSchema = schemix.MustNew(`{
     username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
-    email:    =~"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
-    password: =~"^.{8,64}$"
+    email:    string @blob(this.email.is_email())
+    password: string @blob(this.password.len_between(min: 8, max: 64))
+    age:      int    @blob(this.age.between(min: 13, max: 150))
     role:     "admin" | "user" | "guest"
-}`)
+}`, schemix.WithErrorFormatter(apiFormatter))
 
 func CreateUser(w http.ResponseWriter, req *http.Request) {
     var body map[string]any
@@ -115,7 +203,11 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 
     r := userSchema.ProcessWithMode(body, schemix.FailAll)
     if !r.Valid {
-        w.WriteHeader(400)
+        status := http.StatusBadRequest
+        if r.HasCode(schemix.CodeRequiredMissing) {
+            status = http.StatusUnprocessableEntity
+        }
+        w.WriteHeader(status)
         json.NewEncoder(w).Encode(map[string]any{
             "error":   "validation_failed",
             "details": r.Errors,
@@ -182,6 +274,122 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 
 </details>
 
+## Custom Functions & Methods
+
+Register custom validation logic using the same API as Bloblang — isolated per Validator:
+
+```go
+// Function style: my_func(args...)
+v, _ := schemix.New(schema, schemix.WithFunction("check_blacklist",
+    func(args ...any) (bloblang.Function, error) {
+        pan := args[0].(string)
+        return func() (any, error) {
+            return !isBlocked(pan), nil
+        }, nil
+    },
+))
+
+// Method style: this.field.my_method()
+v, _ := schemix.New(schema, schemix.WithMethod("is_valid_bin",
+    func(v any) (any, error) {
+        return checkBIN(v.(string)), nil
+    },
+))
+
+// V2 style with typed parameters (PluginSpec + ParsedParams)
+v, _ := schemix.New(schema, schemix.WithFunctionV2("calc_fee",
+    bloblang.NewPluginSpec().
+        Param(bloblang.NewInt64Param("amount")).
+        Param(bloblang.NewFloat64Param("rate")),
+    func(args *bloblang.ParsedParams) (bloblang.Function, error) {
+        amount, _ := args.GetInt64("amount")
+        rate, _ := args.GetFloat64("rate")
+        return func() (any, error) { return float64(amount) * rate, nil }, nil
+    },
+))
+
+// V2 method with params: this.field.method(param: value)
+v, _ := schemix.New(schema, schemix.WithMethodV2("in_range",
+    bloblang.NewPluginSpec().
+        Param(bloblang.NewInt64Param("min")).
+        Param(bloblang.NewInt64Param("max")),
+    func(args *bloblang.ParsedParams) (bloblang.Method, error) {
+        min, _ := args.GetInt64("min")
+        max, _ := args.GetInt64("max")
+        return func(v any) (any, error) {
+            n := v.(int64)
+            return n >= min && n <= max, nil
+        }, nil
+    },
+))
+```
+
+## Error Handling
+
+```go
+r := v.Process(data)
+
+r.Valid                              // bool
+r.Err()                              // combined error (nil if valid)
+r.FirstError()                       // *ValidationError
+r.ErrorsByPath("pan")                // []ValidationError
+r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
+r.ErrorsByType("cue")                // []ValidationError — filter by layer
+r.HasCode(schemix.CodeBizRuleFailed) // bool — quick category check
+r.HasErrorsAt("email")              // bool — field-level check
+r.ErrorMessages()                    // newline-joined string
+```
+
+## Custom Error Messages
+
+Provide a custom `ErrorFormatter` for i18n or user-facing messages:
+
+```go
+v := schemix.MustNew(schema, schemix.WithErrorFormatter(
+    func(code schemix.ErrorCode, path, detail string) string {
+        return i18n.T("zh-CN", string(code), path)
+    },
+))
+```
+
+The formatter receives the error code, field path, and default detail message.
+Return your desired user-facing string. Default behavior (no formatter) passes
+the raw CUE/Bloblang error message through.
+
+## Schema Composition
+
+Use `NewFromValue` to build validators from pre-compiled CUE values with shared definitions:
+
+```go
+ctx := cuecontext.New()
+schema := ctx.CompileString(`{
+    #PAN:      =~"^[0-9]{16}$"
+    #Amount:   int & >0
+    #Currency: "CNY" | "USD" | "EUR"
+
+    pan:      #PAN
+    amount:   #Amount
+    currency: #Currency
+}`)
+
+v, err := schemix.NewFromValue(schema)
+```
+
+## Schema Introspection
+
+Inspect schema structure at runtime for documentation or UI generation:
+
+```go
+fields := v.Fields() // []FieldInfo
+
+for _, f := range fields {
+    fmt.Printf("%s: %s (optional=%v, blob=%v)\n", f.Path, f.Type, f.Optional, f.HasBlob)
+    for _, child := range f.Children {
+        fmt.Printf("  %s: %s\n", child.Path, child.Type)
+    }
+}
+```
+
 ## FailMode
 
 | Mode | Best For | Behavior |
@@ -191,8 +399,8 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 | `FailPriority` | Layered validation | Priority-group isolation |
 
 ```go
-r := v.ProcessWithMode(data, schemix.FailFast)  // 1 error max
-r := v.ProcessWithMode(data, schemix.FailAll)   // all errors
+r := v.ProcessWithMode(data, schemix.FailFast)     // 1 error max
+r := v.ProcessWithMode(data, schemix.FailAll)      // all errors
 r := v.ProcessWithMode(data, schemix.FailPriority) // p1 fails → skip p2+
 ```
 
@@ -246,17 +454,26 @@ reg.Unregister("user")             // remove
 
 ```go
 // Construction
-v := schemix.MustNew(cueSrc)              // panic on error
-v, err := schemix.NewWithContext(ctx, src) // shared CUE context
+v := schemix.MustNew(cueSrc)                    // panic on error
+v, _ := schemix.NewWithContext(ctx, src)         // shared CUE context
+v, _ := schemix.NewFromValue(cueValue)           // from pre-compiled CUE value
 
-// Result
+// Options
+schemix.WithErrorFormatter(fn)                   // custom error messages
+schemix.WithFunction(name, ctor)                 // custom function (V1)
+schemix.WithFunctionV2(name, spec, ctor)         // custom function (V2)
+schemix.WithMethod(name, fn)                     // custom method (V1)
+schemix.WithMethodV2(name, spec, ctor)           // custom method (V2)
+
+// Validation (fast path — no Output allocation)
+valid, errs := v.Validate(data)
+
+// Processing (validation + computed fields)
 r := v.Process(data)
-r.Valid                         // bool
-r.Output                        // map with computed fields
-r.Err()                         // error (nil if valid)
-r.FirstError()                  // *ValidationError
-r.ErrorsByPath("pan")           // []ValidationError
-r.ErrorMessages()               // newline-joined string
+r := v.ProcessWithMode(data, schemix.FailFast)
+
+// Introspection
+fields := v.Fields()                             // []FieldInfo
 ```
 
 ## Benchmarks
@@ -265,11 +482,15 @@ Apple M4, Go 1.25 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 393 µs | 777 KB | 21894 |
-| `Process` (valid) | **16 µs** | 41 KB | 308 |
-| `Process` (invalid) | 26 µs | 50 KB | 525 |
-| `Process` (nested) | 38 µs | 68 KB | 671 |
+| `New` (compile) | 430 µs | 808 KB | 22195 |
+| `Process` (valid) | **2.5 µs** | 4.0 KB | 61 |
+| `Process` (invalid) | 2.9 µs | 4.7 KB | 75 |
+| `Process` (nested) | 28 µs | 40 KB | 456 |
+| `Validate` (no output) | 2.4 µs | 3.6 KB | 57 |
 | `Registry.Get` | 5.6 ns | 0 B | 0 |
+
+> Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
+> achieving **127x speedup** over the CUE Unify path (115ns vs 14.6µs for validation only).
 
 ## License
 
