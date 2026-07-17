@@ -61,4 +61,6 @@ jobs:
           auto-push: false
           comment-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          skip-fetch-gh-pages: true
+          save-data-file: false
         if: github.event_name == 'pull_request'
