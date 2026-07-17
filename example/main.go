@@ -34,4 +34,22 @@ func main() {
 
 	fmt.Println("\n10. API request validation:")
 	apiValidationExample()
+
+	fmt.Println("\n11. Custom error messages (i18n):")
+	formatterExample()
+
+	fmt.Println("\n12. Custom validation functions:")
+	customFuncExample()
+
+	fmt.Println("\n13. Schema introspection:")
+	introspectExample()
+
+	fmt.Println("\n14. Result chain API:")
+	resultChainExample()
+
+	fmt.Println("\n15. Schema composition (NewFromValue):")
+	compositionExample()
+
+	fmt.Println("\n16. Built-in validation methods:")
+	builtinValidatorsExample()
 }
