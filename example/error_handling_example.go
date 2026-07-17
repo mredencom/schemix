@@ -46,6 +46,22 @@ func errorHandlingExample() {
 	for _, e := range r.Errors {
 		fmt.Printf("    [%s|%s] %s → %s\n", e.Code, e.Type, e.Path, truncate(e.Message, 50))
 	}
+
+	// Method 6: HasCode() — quick check if a specific error category exists
+	fmt.Printf("  HasCode(TypeMismatch)=%v\n", r.HasCode(schemix.CodeTypeMismatch))
+	fmt.Printf("  HasCode(RequiredMissing)=%v\n", r.HasCode(schemix.CodeRequiredMissing))
+
+	// Method 7: ErrorsByCode() — filter by error code
+	typeErrors := r.ErrorsByCode(schemix.CodeTypeMismatch)
+	fmt.Printf("  ErrorsByCode(TypeMismatch): %d error(s)\n", len(typeErrors))
+
+	// Method 8: ErrorsByType() — filter by validation layer
+	cueErrors := r.ErrorsByType("cue")
+	fmt.Printf("  ErrorsByType(cue): %d error(s)\n", len(cueErrors))
+
+	// Method 9: HasErrorsAt() — quick check if a specific field has errors
+	fmt.Printf("  HasErrorsAt(name)=%v, HasErrorsAt(memo)=%v\n",
+		r.HasErrorsAt("name"), r.HasErrorsAt("memo"))
 }
 
 func splitLines(s string) []string {

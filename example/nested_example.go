@@ -12,8 +12,10 @@ func nestedExample() {
 	{
 		order_id: =~"^ORD-[0-9]+$"
 		customer: {
-			name: string @blob(this.customer.name.length() >= 2)
-			email: =~"^.+@.+\\..+$"
+			// Built-in methods: not_blank + len_between for name validation
+			name: string @blob(this.customer.name.not_blank() && this.customer.name.len_between(min: 2, max: 50))
+			// Built-in method: is_email replaces manual regex
+			email: string @blob(this.customer.email.is_email())
 		}
 		items: [...{
 			product: string
@@ -38,15 +40,15 @@ func nestedExample() {
 	})
 	fmt.Printf("  valid=%v, total=%v\n", r.Valid, r.Output["total"])
 
-	// Invalid array elements
+	// Invalid: bad email + invalid array elements
 	r = v.Process(map[string]any{
 		"order_id": "ORD-002",
-		"customer": map[string]any{"name": "Bob", "email": "bob@test.com"},
+		"customer": map[string]any{"name": "Bob", "email": "not-an-email"},
 		"items": []any{
 			map[string]any{"product": "Phone", "price": -100.0, "qty": int64(0)},
 		},
 	})
-	fmt.Printf("  invalid items: valid=%v, errors=%d\n", r.Valid, len(r.Errors))
+	fmt.Printf("  invalid: valid=%v, errors=%d\n", r.Valid, len(r.Errors))
 	for _, e := range r.Errors {
 		fmt.Printf("    [%s] %s: %s\n", e.Code, e.Path, truncate(e.Message, 60))
 	}

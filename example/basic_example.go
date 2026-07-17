@@ -16,6 +16,9 @@ func basicExample() {
 		amount: int & >0
 		currency: "156" | "840"
 
+		// Built-in validation method: Luhn checksum
+		luhn_check: bool @blob(this.pan.luhn_valid())
+
 		// @blob dynamic validation (returns bool)
 		pan_check: bool @blob(this.pan.has_prefix("62") || this.pan.has_prefix("4"))
 
@@ -29,14 +32,14 @@ func basicExample() {
 		log.Fatal(err)
 	}
 
-	// Valid data
+	// Valid data (4111111111111111 passes Luhn)
 	r := v.Process(map[string]any{
-		"pan": "6222021234567890", "amount": int64(10000), "currency": "156",
+		"pan": "4111111111111111", "amount": int64(10000), "currency": "840",
 	})
 	fmt.Printf("  valid=%v, card_brand=%v, fee=%v, pan_masked=%v\n",
 		r.Valid, r.Output["card_brand"], r.Output["fee"], r.Output["pan_masked"])
 
-	// Invalid data
+	// Invalid: bad Luhn checksum + wrong currency
 	r = v.Process(map[string]any{
 		"pan": "9999000011112222", "amount": int64(-1), "currency": "999",
 	})

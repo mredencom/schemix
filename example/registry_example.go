@@ -49,6 +49,22 @@ func registryExample() {
 	})
 	fmt.Printf("  validate user: valid=%v\n", r.Valid)
 
+	// Fields(): inspect schema structure at runtime
+	fmt.Printf("  user schema fields: ")
+	for i, f := range v.Fields() {
+		if i > 0 {
+			fmt.Print(", ")
+		}
+		fmt.Printf("%s(%s)", f.Name, f.Type)
+	}
+	fmt.Println()
+
+	// Validate(): fast path — no Output allocation
+	valid, errs := v.Validate(map[string]any{
+		"username": "x", "email": "bad", "age": int64(200),
+	})
+	fmt.Printf("  Validate (fast): valid=%v, errors=%d\n", valid, len(errs))
+
 	// Unregister: remove
 	removed := reg.Unregister("product")
 	fmt.Printf("  removed product: %v, remaining %d\n", removed, reg.Len())

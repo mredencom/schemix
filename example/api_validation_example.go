@@ -9,6 +9,26 @@ import (
 	"github.com/mredencom/schemix"
 )
 
+// apiErrorMessages provides user-friendly error messages for API responses.
+var apiErrorMessages = map[schemix.ErrorCode]string{
+	schemix.CodeFormatMismatch:  "Invalid format",
+	schemix.CodeTypeMismatch:    "Wrong data type",
+	schemix.CodeEnumInvalid:     "Value not allowed",
+	schemix.CodeRangeViolation:  "Value out of range",
+	schemix.CodeRequiredMissing: "This field is required",
+	schemix.CodeBizRuleFailed:   "Business rule violated",
+	schemix.CodeCondRequired:    "Required under current conditions",
+	schemix.CodeExprExecError:   "Validation expression error",
+}
+
+// apiFormatter produces clean user-facing messages (no CUE internals exposed).
+func apiFormatter(code schemix.ErrorCode, path, _ string) string {
+	if msg, ok := apiErrorMessages[code]; ok {
+		return msg
+	}
+	return "Validation failed"
+}
+
 // Pre-compiled validators for each API endpoint (initialized once at startup).
 var (
 	createUserSchema = schemix.MustNew(`{
@@ -17,7 +37,7 @@ var (
 		password: =~"^.{8,64}$"
 		age?:     int & >=1 & <=150 @meta(optional,omit_empty)
 		role:     "admin" | "user" | "guest"
-	}`)
+	}`, schemix.WithErrorFormatter(apiFormatter))
 
 	createOrderSchema = schemix.MustNew(`{
 		user_id:    =~"^[a-f0-9]{24}$"
@@ -35,7 +55,7 @@ var (
 		shipping_check: bool @blob(
 			if this.shipping == "express" { this.quantity <= 10 } else { true }
 		)
-	}`)
+	}`, schemix.WithErrorFormatter(apiFormatter))
 
 	transferSchema = schemix.MustNew(`{
 		from_account: =~"^[A-Z0-9]{10,20}$"
@@ -53,7 +73,7 @@ var (
 			else if this.amount > 100000 { (this.amount * 0.001).ceil() }
 			else { (this.amount * 0.005).ceil() }
 		)
-	}`)
+	}`, schemix.WithErrorFormatter(apiFormatter))
 )
 
 func apiValidationExample() {
@@ -122,6 +142,7 @@ func simulateRequest(schema *schemix.Validator, body map[string]any) {
 }
 
 // formatErrorResponse converts validation result to a standard API error response.
+// Uses Result chain API for categorized error handling.
 func formatErrorResponse(r schemix.Result) map[string]any {
 	details := make([]map[string]any, 0, len(r.Errors))
 	for _, e := range r.Errors {
@@ -131,15 +152,24 @@ func formatErrorResponse(r schemix.Result) map[string]any {
 			"message": e.Message,
 		})
 	}
+
+	// Use HasCode for smart HTTP status differentiation
+	category := "validation_failed"
+	if r.HasCode(schemix.CodeRequiredMissing) {
+		category = "missing_fields"
+	} else if r.HasCode(schemix.CodeBizRuleFailed) {
+		category = "business_rule_violation"
+	}
+
 	return map[string]any{
-		"error":   "validation_failed",
+		"error":   category,
 		"message": fmt.Sprintf("%d field(s) failed validation", len(r.Errors)),
 		"details": details,
 	}
 }
 
 // apiHandler demonstrates how to use schemix in an actual HTTP handler.
-// This is the recommended pattern for production use.
+// Combines ErrorFormatter (clean messages) + FailFast (gateway) + HasCode (routing).
 func apiHandler(schema *schemix.Validator) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		// 1. Decode request body
@@ -153,10 +183,15 @@ func apiHandler(schema *schemix.Validator) http.HandlerFunc {
 			return
 		}
 
-		// 2. Validate with FailFast for gateway scenarios (or FailAll for forms)
+		// 2. Validate with FailFast for gateway scenarios
 		r := schema.ProcessWithMode(body, schemix.FailFast)
 		if !r.Valid {
-			w.WriteHeader(http.StatusBadRequest)
+			// Use HasCode to determine HTTP status
+			status := http.StatusBadRequest
+			if r.HasCode(schemix.CodeRequiredMissing) {
+				status = http.StatusUnprocessableEntity // 422 for missing fields
+			}
+			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(formatErrorResponse(r))
 			return
 		}

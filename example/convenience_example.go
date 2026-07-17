@@ -27,6 +27,34 @@ func convenienceExample() {
 	fmt.Printf("  SharedContext v2: valid=%v\n", v2.Process(map[string]any{"y": "hello"}).Valid)
 	fmt.Printf("  SharedContext v3: valid=%v\n", v3.Process(map[string]any{"z": "12345"}).Valid)
 
+	// NewFromValue: compose schemas from pre-compiled CUE values (with definitions)
+	combined := ctx.CompileString(`{
+		#Amount: int & >0 & <=1000000
+		#SKU:    =~"^SKU-[A-Z0-9]{8}$"
+
+		amount:  #Amount
+		sku:     #SKU
+		qty:     int & >=1
+	}`)
+	vComposed, _ := schemix.NewFromValue(combined)
+	r = vComposed.Process(map[string]any{"amount": int64(500), "sku": "SKU-ABCD1234", "qty": int64(3)})
+	fmt.Printf("  NewFromValue (composed): valid=%v\n", r.Valid)
+
+	// Fields(): runtime introspection of schema structure
+	fields := vComposed.Fields()
+	fmt.Printf("  Fields() → %d fields: ", len(fields))
+	for i, f := range fields {
+		if i > 0 {
+			fmt.Print(", ")
+		}
+		fmt.Printf("%s(%s)", f.Name, f.Type)
+	}
+	fmt.Println()
+
+	// Validate: fast path — skips Output construction
+	valid, errs := v1.Validate(map[string]any{"x": int64(0)})
+	fmt.Printf("  Validate (fast): valid=%v, errors=%d\n", valid, len(errs))
+
 	// Registry internally shares context automatically, no manual management needed
 	reg := schemix.NewRegistry()
 	_ = reg.Register("a", `{ val: int }`)

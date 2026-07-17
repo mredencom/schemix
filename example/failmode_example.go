@@ -36,4 +36,17 @@ func failModeExample() {
 	// FailPriority: priority group isolation (p1 failure skips p2/p3)
 	r3 := v.ProcessWithMode(bad, schemix.FailPriority)
 	fmt.Printf("  FailPriority: errors=%d (p1 failure skips p2/p3)\n", len(r3.Errors))
+
+	// Use HasCode + ErrorsByType for smart error routing
+	fmt.Printf("  FailAll breakdown:\n")
+	fmt.Printf("    CUE errors: %d\n", len(r1.ErrorsByType("cue")))
+	fmt.Printf("    Blob errors: %d\n", len(r1.ErrorsByType("bloblang")))
+	fmt.Printf("    Has format errors: %v\n", r1.HasCode(schemix.CodeFormatMismatch))
+	fmt.Printf("    Has range errors: %v\n", r1.HasCode(schemix.CodeRangeViolation))
+
+	// Required field detection (new in Phase 1)
+	missing := map[string]any{"mti": "0100"} // pan, amount, currency, merchant all missing
+	r4 := v.ProcessWithMode(missing, schemix.FailAll)
+	fmt.Printf("  Missing fields: errors=%d, HasCode(RequiredMissing)=%v\n",
+		len(r4.Errors), r4.HasCode(schemix.CodeRequiredMissing))
 }
