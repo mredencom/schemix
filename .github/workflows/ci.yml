@@ -53,14 +53,9 @@ jobs:
       - name: Run benchmarks
         run: go test -bench=. -benchmem -count=1 $(go list ./... | grep -v /example) | tee bench.txt
 
-      - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: 'go'
-          output-file-path: bench.txt
-          auto-push: false
-          comment-on-alert: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          skip-fetch-gh-pages: true
-          save-data-file: false
-        if: github.event_name == 'pull_request'
+      - name: Benchmark summary
+        run: |
+          echo '## Benchmark Results' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat bench.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
