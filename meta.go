@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue"
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // blobParser is a function that compiles a Bloblang mapping string.

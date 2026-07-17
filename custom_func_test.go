@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // ========== WithFunction (FunctionConstructor style) ==========

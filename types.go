@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/redpanda-data/benthos/v4/public/bloblang"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // ErrorCode is a structured error identifier with format E{layer}{category}{seq}.
