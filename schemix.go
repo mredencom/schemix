@@ -3,6 +3,7 @@ package schemix
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/cuecontext"
@@ -57,17 +58,26 @@ func (v *Validator) parseBloblang(mapping string) (*bloblang.Executor, error) {
 	return bloblang.Parse(mapping)
 }
 
-// buildBlobEnv creates an isolated Bloblang environment with built-in
-// validators and any user-registered custom functions/methods.
+// buildBlobEnv creates a Bloblang environment with built-in validators and
+// any user-registered custom functions/methods.
+//
+// Optimization: built-in methods are registered once into a shared base
+// environment (package-level sync.Once). When no custom functions are needed,
+// the shared environment is returned directly (zero allocation). When custom
+// functions exist, it clones the shared env and appends registrations.
 func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
-	env := bloblang.NewEnvironment()
-
-	// Register built-in validation methods and functions
-	if err := registerBuiltins(env); err != nil {
-		return nil, fmt.Errorf("register builtins: %w", err)
+	base, err := getBaseEnv()
+	if err != nil {
+		return nil, err
 	}
 
-	// Register user custom functions/methods
+	// No custom functions — reuse shared environment directly (zero cost)
+	if len(cfg.customFuncs) == 0 {
+		return base, nil
+	}
+
+	// Clone the shared base and add custom registrations
+	env := base.Clone()
 	for _, entry := range cfg.customFuncs {
 		var regErr error
 		switch entry.kind {
@@ -84,8 +94,27 @@ func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
 			return nil, fmt.Errorf("register %q: %w", entry.name, regErr)
 		}
 	}
-
 	return env, nil
+}
+
+// baseEnv is the shared Bloblang environment with all schemix built-in methods
+// pre-registered. Initialized once via sync.Once.
+var (
+	baseEnv     *bloblang.Environment
+	baseEnvErr  error
+	baseEnvOnce sync.Once
+)
+
+// getBaseEnv returns the shared base environment, initializing it on first call.
+func getBaseEnv() (*bloblang.Environment, error) {
+	baseEnvOnce.Do(func() {
+		env := bloblang.NewEnvironment()
+		baseEnvErr = registerBuiltins(env)
+		if baseEnvErr == nil {
+			baseEnv = env
+		}
+	})
+	return baseEnv, baseEnvErr
 }
 
 // registerBuiltins registers all schemix built-in validation methods and functions
