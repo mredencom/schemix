@@ -6,10 +6,10 @@ import (
 )
 
 // TestClassifyCUEError_GoldenMatrix is a comprehensive test matrix that exercises
-// every ErrorCode produced by classifyCUEError. This serves as a regression guard
+// every ErrorCode produced by classifyByMessage. This serves as a regression guard
 // against CUE library upgrades changing error message text.
 //
-// If CUE updates break this matrix, it means classifyCUEError needs updating.
+// If CUE updates break this matrix, it means classifyByMessage needs updating.
 func TestClassifyCUEError_GoldenMatrix(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -189,9 +189,9 @@ func TestClassifyCUEError_StringMatching(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.msg[:min(40, len(tt.msg))], func(t *testing.T) {
-			got := classifyCUEError(tt.msg)
+			got := classifyByMessage(tt.msg)
 			if got != tt.expected {
-				t.Errorf("classifyCUEError(%q)\n  got  %s\n  want %s", tt.msg, got, tt.expected)
+				t.Errorf("classifyByMessage(%q)\n  got  %s\n  want %s", tt.msg, got, tt.expected)
 			}
 		})
 	}

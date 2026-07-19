@@ -7,84 +7,122 @@ import (
 	cueerrors "cuelang.org/go/cue/errors"
 )
 
-// classifyCUEErrorStructured classifies a CUE error using the structured Msg()
-// interface first (stable format strings), falling back to string matching.
-// This is more resilient to CUE library upgrades than pure string matching.
+// classifyCUEErrorStructured classifies a CUE error by inspecting the stable
+// Msg() format string first, falling back to error message string matching.
 func classifyCUEErrorStructured(err cueerrors.Error) ErrorCode {
 	format, args := err.Msg()
 
-	switch {
-	// "invalid value %v (out of bound %s)" — range or regex
-	case format == "invalid value %v (out of bound %s)":
+	if code := classifyByFormat(format, args); code != "" {
+		return code
+	}
+	return classifyByMessage(err.Error())
+}
+
+// --- Format classification (stable CUE API) ---
+
+// Known format strings → error code (O(1) lookup).
+var formatCodes = map[string]ErrorCode{
+	"conflicting values %s and %s (mismatched types %s and %s)": CodeTypeMismatch,
+	"conflicting values %s and %s":                              CodeEnumInvalid,
+	"%d errors in empty disjunction:":                           CodeEnumInvalid,
+	"incomplete value %v":                                       CodeRequiredMissing,
+}
+
+func classifyByFormat(format string, args []any) ErrorCode {
+	// Fast path: direct map lookup
+	if code, ok := formatCodes[format]; ok {
+		return code
+	}
+
+	// Bound expression: regex (=~) vs numeric range
+	if format == "invalid value %v (out of bound %s)" {
 		if len(args) >= 2 {
-			bound := fmt.Sprintf("%v", args[1])
-			if strings.HasPrefix(bound, "=~") || strings.HasPrefix(bound, "!~") {
+			if b := fmt.Sprintf("%v", args[1]); strings.HasPrefix(b, "=~") || strings.HasPrefix(b, "!~") {
 				return CodeFormatMismatch
 			}
 		}
 		return CodeRangeViolation
-
-	// "conflicting values %s and %s (mismatched types %s and %s)" — type mismatch
-	case format == "conflicting values %s and %s (mismatched types %s and %s)":
-		return CodeTypeMismatch
-
-	// "conflicting values %s and %s" — enum or value conflict
-	case format == "conflicting values %s and %s":
-		return CodeEnumInvalid
-
-	// "%d errors in empty disjunction:" — enum exhausted
-	case format == "%d errors in empty disjunction:":
-		return CodeEnumInvalid
-
-	// "incomplete value %v" — required field missing
-	case format == "incomplete value %v":
-		return CodeRequiredMissing
-
-	// "cannot use %s (type %s) as type %s" — type mismatch
-	case strings.HasPrefix(format, "cannot use"):
-		return CodeTypeMismatch
-
-	// "field is required but not present" — required
-	case strings.Contains(format, "field is required"):
-		return CodeRequiredMissing
-
-	default:
-		// Fallback to string matching for any unrecognized format
-		return classifyCUEError(err.Error())
 	}
+
+	// Prefix/contains patterns
+	if strings.HasPrefix(format, "cannot use") {
+		return CodeTypeMismatch
+	}
+	if strings.Contains(format, "field is required") {
+		return CodeRequiredMissing
+	}
+
+	return "" // not recognized → fall through
 }
 
-// classifyCUEError derives a structured ErrorCode from a CUE error message string.
-// This is the fallback classifier used when structural Msg() format is unrecognized.
-func classifyCUEError(errMsg string) ErrorCode {
+// --- Message classification (fallback for unknown formats) ---
+
+// msgRule: code is returned when ALL "must" match, at least one "any" matches,
+// and NONE of "not" match against the lowercased error message.
+type msgRule struct {
+	code ErrorCode
+	must []string
+	any  []string
+	not  []string
+}
+
+var msgRules = []msgRule{
+	{CodeFormatMismatch, s("does not match"), nil, nil},
+	{CodeTypeMismatch, s("cannot use value"), nil, nil},
+	{CodeEnumInvalid, s("empty disjunction"), nil, nil},
+	{CodeEnumInvalid, s("conflicting values", "|"), nil, nil},
+	{CodeEnumInvalid, s("conflicting values"), nil, s("string", "int", "bool", "number", "float")},
+	{CodeTypeMismatch, s("conflicting values"), nil, nil},
+	{CodeFormatMismatch, s("out of bound", "=~"), nil, nil},
+	{CodeRangeViolation, s("out of bound"), nil, nil},
+	{CodeRangeViolation, s("invalid value"), s(">=", "<=", "> ", "< "), nil},
+	{CodeRequiredMissing, s("incomplete value"), nil, nil},
+	{CodeRequiredMissing, s("field is required"), nil, nil},
+}
+
+// s is a shorthand for []string to keep the rule table compact.
+func s(ss ...string) []string { return ss }
+
+func classifyByMessage(errMsg string) ErrorCode {
 	msg := strings.ToLower(errMsg)
-	switch {
-	case strings.Contains(msg, "does not match"):
-		return CodeFormatMismatch
-	case strings.Contains(msg, "cannot use value"):
-		return CodeTypeMismatch
-	case strings.Contains(msg, "empty disjunction"):
-		return CodeEnumInvalid
-	case strings.Contains(msg, "conflicting values") && strings.Contains(msg, "|"):
-		return CodeEnumInvalid
-	case strings.Contains(msg, "conflicting values") &&
-		!strings.Contains(msg, "string") && !strings.Contains(msg, "int") &&
-		!strings.Contains(msg, "bool") && !strings.Contains(msg, "number") &&
-		!strings.Contains(msg, "float"):
-		return CodeEnumInvalid
-	case strings.Contains(msg, "conflicting values"):
-		return CodeTypeMismatch
-	case strings.Contains(msg, "out of bound") && strings.Contains(msg, "=~"):
-		return CodeFormatMismatch
-	case strings.Contains(msg, "out of bound"),
-		strings.Contains(msg, "invalid value") && (strings.Contains(msg, ">=") ||
-			strings.Contains(msg, "<=") || strings.Contains(msg, "> ") ||
-			strings.Contains(msg, "< ")):
-		return CodeRangeViolation
-	case strings.Contains(msg, "incomplete value"),
-		strings.Contains(msg, "field is required"):
-		return CodeRequiredMissing
-	default:
-		return CodeCUEOther
+	for i := range msgRules {
+		if matchMsg(&msgRules[i], msg) {
+			return msgRules[i].code
+		}
 	}
+	return CodeCUEOther
+}
+
+func matchMsg(r *msgRule, msg string) bool {
+	return containsAll(msg, r.must) && containsAny(msg, r.any) && containsNone(msg, r.not)
+}
+
+func containsAll(msg string, subs []string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(msg, sub) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAny(msg string, subs []string) bool {
+	if len(subs) == 0 {
+		return true
+	}
+	for _, sub := range subs {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsNone(msg string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(msg, sub) {
+			return false
+		}
+	}
+	return true
 }
