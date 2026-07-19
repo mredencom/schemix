@@ -522,19 +522,21 @@ fields := v.Fields()                             // []FieldInfo
 
 ## Benchmarks
 
-Apple M4, Go 1.25 — 6 fields (3 CUE + 3 @blob):
+Apple M4, Go 1.26 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 430 µs | 808 KB | 22195 |
-| `Process` (valid) | **2.5 µs** | 4.0 KB | 61 |
-| `Process` (invalid) | 2.9 µs | 4.7 KB | 75 |
-| `Process` (nested) | 28 µs | 40 KB | 456 |
-| `Validate` (no output) | 2.4 µs | 3.6 KB | 57 |
-| `Registry.Get` | 5.6 ns | 0 B | 0 |
+| `New` (compile) | 730 µs | 809 KB | 22260 |
+| `Process` (valid) | **4.9 µs** | 4.0 KB | 61 |
+| `Process` (invalid) | 5.2 µs | 4.7 KB | 75 |
+| `Process` (nested) | 45 µs | 40 KB | 456 |
+| `Validate` (no output) | **4.1 µs** | 3.6 KB | 57 |
+| `Process` (parallel, 10 cores) | **2.2 µs** | 4.0 KB | 61 |
+| `ValidateFields` (fast path) | 177 ns | 0 B | 0 |
+| `Registry.Get` | 8.3 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving **127x speedup** over the CUE Unify path (115ns vs 14.6µs for validation only).
+> achieving **250x speedup** over the CUE legacy path (177ns vs 44µs).
 
 ## License
 
