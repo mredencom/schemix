@@ -114,8 +114,8 @@ func isEmpty(v any) bool {
 	}
 }
 
-// sortblobRules sorts rules by priority (stable) using the standard library.
-func sortblobRules(rules []blobRule) {
+// sortBlobRules sorts rules by priority (stable) using the standard library.
+func sortBlobRules(rules []blobRule) {
 	slices.SortStableFunc(rules, func(a, b blobRule) int {
 		return a.Meta.Priority - b.Meta.Priority
 	})

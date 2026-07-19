@@ -342,3 +342,329 @@ func TestWithMethod_MixedFunctionsAndMethods(t *testing.T) {
 		t.Errorf("expected tax=100.0, got %v", r.Output["tax"])
 	}
 }
+
+// ========== FuncMap — reusable function collection ==========
+
+func TestFuncMap_SharedAcrossValidators(t *testing.T) {
+	funcs := NewFuncMap(
+		Func("double", func(args ...any) (bloblang.Function, error) {
+			n := args[0].(int64)
+			return func() (any, error) { return n * 2, nil }, nil
+		}),
+		Method("is_positive", func(v any) (any, error) {
+			n, ok := v.(int64)
+			if !ok {
+				return false, nil
+			}
+			return n > 0, nil
+		}),
+	)
+	if funcs.Err() != nil {
+		t.Fatalf("FuncMap error: %v", funcs.Err())
+	}
+
+	// Same FuncMap used by two different validators
+	v1, err := New(`{
+		amount: int
+		doubled: number @blob(double(this.amount))
+	}`, WithFuncMap(funcs))
+	if err != nil {
+		t.Fatalf("v1: %v", err)
+	}
+
+	v2, err := New(`{
+		score: int
+		check: bool @blob(this.score.is_positive())
+	}`, WithFuncMap(funcs))
+	if err != nil {
+		t.Fatalf("v2: %v", err)
+	}
+
+	r := v1.Process(map[string]any{"amount": int64(50)})
+	if !r.Valid || r.Output["doubled"] != int64(100) {
+		t.Errorf("v1: expected doubled=100, got %v", r.Output["doubled"])
+	}
+
+	r = v2.Process(map[string]any{"score": int64(10)})
+	if !r.Valid {
+		t.Errorf("v2: expected valid, got %v", r.Errors)
+	}
+
+	r = v2.Process(map[string]any{"score": int64(-1)})
+	if r.Valid {
+		t.Error("v2: expected invalid for negative score")
+	}
+}
+
+func TestFuncMap_OptionStyle(t *testing.T) {
+	funcs := NewFuncMap(
+		Func("add_one", func(args ...any) (bloblang.Function, error) {
+			n := args[0].(int64)
+			return func() (any, error) { return n + 1, nil }, nil
+		}),
+		Method("is_even", func(v any) (any, error) {
+			n, ok := v.(int64)
+			return ok && n%2 == 0, nil
+		}),
+	)
+
+	v, err := New(`{
+		n:     int
+		n1:    number @blob(add_one(this.n))
+		check: bool   @blob(this.n.is_even())
+	}`, WithFuncMap(funcs))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r := v.Process(map[string]any{"n": int64(4)})
+	if !r.Valid {
+		t.Errorf("expected valid, got %v", r.Errors)
+	}
+	if r.Output["n1"] != int64(5) {
+		t.Errorf("expected n1=5, got %v", r.Output["n1"])
+	}
+}
+
+func TestFuncMap_CombineWithSingleOptions(t *testing.T) {
+	funcs := NewFuncMap(
+		Method("triple", func(v any) (any, error) {
+			n := v.(int64)
+			return n * 3, nil
+		}),
+	)
+
+	// FuncMap + individual WithFunction + WithErrorFormatter — all work together
+	v, err := New(`{
+		x:       int
+		tripled: number @blob(this.x.triple())
+		check:   bool   @blob(is_ok(this.x))
+	}`,
+		WithFuncMap(funcs),
+		WithFunction("is_ok", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r := v.Process(map[string]any{"x": int64(7)})
+	if !r.Valid {
+		t.Errorf("expected valid, got %v", r.Errors)
+	}
+	if r.Output["tripled"] != int64(21) {
+		t.Errorf("expected tripled=21, got %v", r.Output["tripled"])
+	}
+}
+
+func TestFuncMap_InvalidName(t *testing.T) {
+	funcs := NewFuncMap(
+		Func("ValidName", func(args ...any) (bloblang.Function, error) { // uppercase — invalid
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if funcs.Err() == nil {
+		t.Fatal("expected error for invalid name 'ValidName'")
+	}
+
+	// Using invalid FuncMap in New() should return error
+	_, err := New(`{ x: string }`, WithFuncMap(funcs))
+	if err == nil {
+		t.Fatal("expected New to fail with invalid FuncMap")
+	}
+}
+
+func TestFuncMap_InvalidNameVariants(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"check_blacklist", true},
+		{"is_email", true},
+		{"luhn_valid", true},
+		{"a1b2", true},
+		{"x", true},
+		{"CheckBlacklist", false},  // uppercase
+		{"check-blacklist", false}, // dash
+		{"_leading", false},        // leading underscore
+		{"check__double", false},   // double underscore
+		{"123start", true},         // digits allowed at start
+		{"", false},                // empty
+	}
+
+	for _, tt := range tests {
+		err := validateName(tt.name)
+		if tt.valid && err != nil {
+			t.Errorf("validateName(%q) should be valid, got: %v", tt.name, err)
+		}
+		if !tt.valid && err == nil {
+			t.Errorf("validateName(%q) should be invalid", tt.name)
+		}
+	}
+}
+
+// ========== Conflict Detection ==========
+
+func TestConflict_BuiltinMethodBlocked(t *testing.T) {
+	_, err := New(`{ email: string }`,
+		WithMethod("is_email", func(v any) (any, error) {
+			return false, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error when registering method that conflicts with builtin")
+	}
+	if !strings.Contains(err.Error(), "conflicts with a built-in") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestConflict_BuiltinFunctionBlocked(t *testing.T) {
+	_, err := New(`{ d: string }`,
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error for conflicting function name")
+	}
+}
+
+func TestConflict_FuncMapBuiltinBlocked(t *testing.T) {
+	funcs := NewFuncMap(
+		Method("luhn_valid", func(v any) (any, error) { return false, nil }),
+	)
+	_, err := New(`{ pan: string }`, WithFuncMap(funcs))
+	if err == nil {
+		t.Fatal("expected error for conflicting FuncMap method")
+	}
+}
+
+func TestConflict_CrossNamespaceAllowed(t *testing.T) {
+	// is_email 是内置 Method，用户注册同名 Function 不冲突（不同命名空间）
+	v, err := New(`{ email: string, check: bool @blob(is_email(this.email)) }`,
+		WithFunction("is_email", func(args ...any) (bloblang.Function, error) {
+			s, _ := args[0].(string)
+			return func() (any, error) {
+				return strings.Contains(s, "@"), nil
+			}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("cross-namespace should not conflict: %v", err)
+	}
+	r := v.Process(map[string]any{"email": "a@b.com"})
+	if !r.Valid {
+		t.Errorf("expected valid: %v", r.Errors)
+	}
+}
+
+func TestConflict_NonBuiltinNameAllowed(t *testing.T) {
+	_, err := New(`{ x: int, check: bool @blob(my_custom_check(this.x)) }`,
+		WithFunction("my_custom_check", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("non-conflicting name should work: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideAllows(t *testing.T) {
+	// 显式 WithOverride 允许覆盖 is_email
+	v, err := New(`{ email: string, check: bool @blob(this.email.is_email()) }`,
+		WithOverrideMethod("is_email"),
+		WithMethod("is_email", func(v any) (any, error) {
+			// 自定义逻辑：只接受 @company.com 结尾
+			s, _ := v.(string)
+			return strings.HasSuffix(s, "@company.com"), nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("expected no error with WithOverride: %v", err)
+	}
+
+	// 公司邮箱通过
+	r := v.Process(map[string]any{"email": "alice@company.com"})
+	if !r.Valid {
+		t.Error("expected valid for @company.com")
+	}
+
+	// 普通邮箱被自定义逻辑拒绝
+	r = v.Process(map[string]any{"email": "alice@gmail.com"})
+	if r.Valid {
+		t.Error("expected invalid — custom is_email rejects non-company emails")
+	}
+}
+
+func TestConflict_WithOverrideMultiple(t *testing.T) {
+	_, err := New(`{ x: string }`,
+		WithOverrideMethod("is_email", "luhn_valid"),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithMethod("luhn_valid", func(v any) (any, error) { return true, nil }),
+	)
+	if err != nil {
+		t.Fatalf("expected no error with multiple overrides: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideOnlySpecified(t *testing.T) {
+	// Override is_email but NOT luhn_valid — luhn_valid should still be blocked
+	_, err := New(`{ x: string }`,
+		WithOverrideMethod("is_email"),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithMethod("luhn_valid", func(v any) (any, error) { return true, nil }),
+	)
+	if err == nil {
+		t.Fatal("expected error — luhn_valid not in override list")
+	}
+	if !strings.Contains(err.Error(), "luhn_valid") {
+		t.Errorf("error should mention luhn_valid: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideAll(t *testing.T) {
+	// WithOverrideAll 允许覆盖任何内置
+	v, err := New(`{
+		email: string
+		check: bool @blob(this.email.is_email())
+		date:  string
+		valid: bool @blob(is_valid_date(this.date))
+	}`,
+		WithOverrideAll(),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("WithOverrideAll should allow everything: %v", err)
+	}
+	r := v.Process(map[string]any{"email": "anything", "date": "anything"})
+	if !r.Valid {
+		t.Errorf("all overridden to return true: %v", r.Errors)
+	}
+}
+
+func TestConflict_WithOverrideFunc(t *testing.T) {
+	// 只允许覆盖 function，method 仍然受保护
+	_, err := New(`{ d: string }`,
+		WithOverrideFunc("is_valid_date"),
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("WithOverrideFunc should allow: %v", err)
+	}
+
+	// 但 method 仍然受保护
+	_, err = New(`{ x: string }`,
+		WithOverrideFunc("is_email"), // 这个对 method 无效
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+	)
+	if err == nil {
+		t.Fatal("WithOverrideFunc should NOT protect methods")
+	}
+}
