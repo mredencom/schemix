@@ -520,19 +520,21 @@ fields := v.Fields()                             // []FieldInfo
 
 ## 性能基准
 
-Apple M4, Go 1.25 — 6 字段（3 CUE + 3 @blob）：
+Apple M4, Go 1.26 — 6 字段（3 CUE + 3 @blob）：
 
 | 操作 | 耗时 | 内存 | 分配次数 |
 |------|------|------|----------|
-| `New`（编译） | 430 µs | 808 KB | 22195 |
-| `Process`（合法） | **2.5 µs** | 4.0 KB | 61 |
-| `Process`（非法） | 2.9 µs | 4.7 KB | 75 |
-| `Process`（嵌套） | 28 µs | 40 KB | 456 |
-| `Validate`（无输出） | 2.4 µs | 3.6 KB | 57 |
-| `Registry.Get` | 5.6 ns | 0 B | 0 |
+| `New`（编译） | 730 µs | 809 KB | 22260 |
+| `Process`（合法） | **4.9 µs** | 4.0 KB | 61 |
+| `Process`（非法） | 5.2 µs | 4.7 KB | 75 |
+| `Process`（嵌套） | 45 µs | 40 KB | 456 |
+| `Validate`（无输出） | **4.1 µs** | 3.6 KB | 57 |
+| `Process`（并行，10 核） | **2.2 µs** | 4.0 KB | 61 |
+| `ValidateFields`（快速路径） | 177 ns | 0 B | 0 |
+| `Registry.Get` | 8.3 ns | 0 B | 0 |
 
 > 简单标量字段使用 Go 原生快速路径，完全绕过 CUE，
-> 相比 CUE Unify 路径实现 **127 倍加速**（校验层 115ns vs 14.6µs）。
+> 相比 CUE 旧路径实现 **250 倍加速**（177ns vs 44µs）。
 
 ## 许可证
 
