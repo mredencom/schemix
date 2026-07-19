@@ -35,7 +35,7 @@ type Validator struct {
 	ctx            *cue.Context
 	schema         cue.Value
 	blobRules      []blobRule
-	cueFields      []cueField           // pre-compiled field descriptors for fast runtime validation
+	cueFields      []cueField            // pre-compiled field descriptors for fast runtime validation
 	errorFormatter ErrorFormatter        // optional custom error message formatter
 	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
 }
@@ -65,6 +65,9 @@ func (v *Validator) parseBloblang(mapping string) (*bloblang.Executor, error) {
 // environment (package-level sync.Once). When no custom functions are needed,
 // the shared environment is returned directly (zero allocation). When custom
 // functions exist, it clones the shared env and appends registrations.
+//
+// Conflict detection: if a user-registered name collides with a built-in
+// method/function, an error is returned.
 func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
 	base, err := getBaseEnv()
 	if err != nil {
@@ -74,6 +77,13 @@ func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
 	// No custom functions — reuse shared environment directly (zero cost)
 	if len(cfg.customFuncs) == 0 {
 		return base, nil
+	}
+
+	// Check for conflicts with built-in names (skip if overrideAll)
+	if !cfg.overrideAll {
+		if err := checkBuiltinConflicts(cfg.customFuncs, cfg.allowMethodOverrides, cfg.allowFuncOverrides); err != nil {
+			return nil, err
+		}
 	}
 
 	// Clone the shared base and add custom registrations
@@ -95,6 +105,51 @@ func buildBlobEnv(cfg *validatorConfig) (*bloblang.Environment, error) {
 		}
 	}
 	return env, nil
+}
+
+// builtinMethodNames and builtinFuncNames hold built-in names by namespace.
+var (
+	builtinMethodNames = func() map[string]bool {
+		names := make(map[string]bool)
+		for _, m := range builtinMethods() {
+			names[m.name] = true
+		}
+		return names
+	}()
+
+	builtinFuncNames = func() map[string]bool {
+		names := make(map[string]bool)
+		for _, f := range builtinFunctions() {
+			names[f.name] = true
+		}
+		return names
+	}()
+)
+
+// checkBuiltinConflicts returns an error if any user-registered name conflicts
+// with a built-in in the SAME namespace, unless explicitly allowed.
+func checkBuiltinConflicts(entries []customFuncEntry, allowedMethods, allowedFuncs []string) error {
+	methodSet := make(map[string]bool, len(allowedMethods))
+	for _, name := range allowedMethods {
+		methodSet[name] = true
+	}
+	funcSet := make(map[string]bool, len(allowedFuncs))
+	for _, name := range allowedFuncs {
+		funcSet[name] = true
+	}
+	for _, e := range entries {
+		switch e.kind {
+		case kindMethodV1, kindMethodV2:
+			if builtinMethodNames[e.name] && !methodSet[e.name] {
+				return fmt.Errorf("method %q conflicts with a built-in validator; use WithOverrideMethod(%q) to allow", e.name, e.name)
+			}
+		case kindFuncV1, kindFuncV2:
+			if builtinFuncNames[e.name] && !funcSet[e.name] {
+				return fmt.Errorf("function %q conflicts with a built-in validator; use WithOverrideFunc(%q) to allow", e.name, e.name)
+			}
+		}
+	}
+	return nil
 }
 
 // baseEnv is the shared Bloblang environment with all schemix built-in methods
@@ -148,35 +203,7 @@ func NewWithContext(ctx *cue.Context, cueSrc string, opts ...Option) (*Validator
 	if err := schema.Err(); err != nil {
 		return nil, fmt.Errorf("CUE compile error: %w", err)
 	}
-
-	cfg := &validatorConfig{}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	v := &Validator{
-		ctx:            ctx,
-		schema:         schema,
-		errorFormatter: cfg.errorFormatter,
-	}
-
-	// Create isolated Bloblang environment with builtins + custom functions
-	env, err := buildBlobEnv(cfg)
-	if err != nil {
-		return nil, err
-	}
-	v.blobEnv = env
-
-	if err := v.extractRules(schema, ""); err != nil {
-		return nil, err
-	}
-
-	sortblobRules(v.blobRules)
-
-	// Optimization #3: pre-compile CUE field descriptors
-	v.cueFields = compileCUEFields(schema, "")
-
-	return v, nil
+	return buildValidator(ctx, schema, opts)
 }
 
 // MustNew is like New but panics on error. Useful for package-level
@@ -203,30 +230,35 @@ func NewFromValue(schema cue.Value, opts ...Option) (*Validator, error) {
 	if err := schema.Err(); err != nil {
 		return nil, fmt.Errorf("CUE value error: %w", err)
 	}
+	return buildValidator(schema.Context(), schema, opts)
+}
 
+// buildValidator is the shared constructor logic for all New* functions.
+func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validator, error) {
 	cfg := &validatorConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
-
-	v := &Validator{
-		ctx:            schema.Context(),
-		schema:         schema,
-		errorFormatter: cfg.errorFormatter,
+	if cfg.funcMapErr != nil {
+		return nil, cfg.funcMapErr
 	}
 
-	// Create isolated Bloblang environment with builtins + custom functions
 	env, err := buildBlobEnv(cfg)
 	if err != nil {
 		return nil, err
 	}
-	v.blobEnv = env
+
+	v := &Validator{
+		ctx:            ctx,
+		schema:         schema,
+		errorFormatter: cfg.errorFormatter,
+		blobEnv:        env,
+	}
 
 	if err := v.extractRules(schema, ""); err != nil {
 		return nil, err
 	}
-
-	sortblobRules(v.blobRules)
+	sortBlobRules(v.blobRules)
 	v.cueFields = compileCUEFields(schema, "")
 
 	return v, nil

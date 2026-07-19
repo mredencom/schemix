@@ -324,6 +324,49 @@ v, _ := schemix.New(schema, schemix.WithMethodV2("in_range",
 ))
 ```
 
+### FuncMap（可复用集合）
+
+多个自定义函数时，使用 `FuncMap` 构建一次、处处复用：
+
+```go
+funcs := schemix.NewFuncMap(
+    schemix.Func("check_blacklist", blacklistFn),
+    schemix.Func("calc_fee", feeFn),
+    schemix.Method("mask_pan", maskFn),
+    schemix.MethodV2("in_range", rangeSpec, rangeCtor),
+)
+
+// 多个 Validator 共享
+v1, _ := schemix.New(schema1, schemix.WithFuncMap(funcs))
+v2, _ := schemix.New(schema2, schemix.WithFuncMap(funcs))
+```
+
+名称在构建时校验（必须 snake_case：`/^[a-z0-9]+(_[a-z0-9]+)*$/`）。
+
+### 覆盖内置校验方法
+
+内置名称默认受保护。使用 `WithOverrideMethod` 或 `WithOverrideFunc` 显式覆盖：
+
+```go
+// 覆盖指定的内置方法
+v, _ := schemix.New(schema,
+    schemix.WithOverrideMethod("is_email"),
+    schemix.WithMethod("is_email", myStrictEmailFn),
+)
+
+// 覆盖指定的内置函数
+v, _ := schemix.New(schema,
+    schemix.WithOverrideFunc("is_valid_date"),
+    schemix.WithFunction("is_valid_date", myDateFn),
+)
+
+// 全量覆盖 — 关闭所有冲突检测
+v, _ := schemix.New(schema, schemix.WithOverrideAll(), schemix.WithFuncMap(myFuncs))
+```
+
+> 注意：Function 和 Method 是独立的命名空间。注册 **Function** `is_email`
+> 不会与内置 **Method** `is_email` 冲突。
+
 ## 错误处理
 
 ```go

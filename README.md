@@ -324,6 +324,50 @@ v, _ := schemix.New(schema, schemix.WithMethodV2("in_range",
 ))
 ```
 
+### FuncMap (Reusable Collections)
+
+For multiple custom functions, use `FuncMap` to build once and share:
+
+```go
+funcs := schemix.NewFuncMap(
+    schemix.Func("check_blacklist", blacklistFn),
+    schemix.Func("calc_fee", feeFn),
+    schemix.Method("mask_pan", maskFn),
+    schemix.MethodV2("in_range", rangeSpec, rangeCtor),
+)
+
+// Share across validators
+v1, _ := schemix.New(schema1, schemix.WithFuncMap(funcs))
+v2, _ := schemix.New(schema2, schemix.WithFuncMap(funcs))
+```
+
+Names are validated at construction time (must be snake_case: `/^[a-z0-9]+(_[a-z0-9]+)*$/`).
+
+### Overriding Built-in Validators
+
+Built-in names are protected by default. Use `WithOverrideMethod` or `WithOverrideFunc` to
+explicitly replace them:
+
+```go
+// Override a specific built-in method
+v, _ := schemix.New(schema,
+    schemix.WithOverrideMethod("is_email"),
+    schemix.WithMethod("is_email", myStrictEmailFn),
+)
+
+// Override a specific built-in function
+v, _ := schemix.New(schema,
+    schemix.WithOverrideFunc("is_valid_date"),
+    schemix.WithFunction("is_valid_date", myDateFn),
+)
+
+// Override all — disable conflict checks entirely
+v, _ := schemix.New(schema, schemix.WithOverrideAll(), schemix.WithFuncMap(myFuncs))
+```
+
+> Note: Function and Method are separate namespaces. Registering a **Function** named
+> `is_email` does NOT conflict with the built-in **Method** `is_email`.
+
 ## Error Handling
 
 ```go
