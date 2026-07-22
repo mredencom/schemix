@@ -184,6 +184,12 @@ r.Output["fee"]        // 150
 | `is_past_date(d)` | `is_past_date(this.birthday)` | 日期在过去 |
 | `is_future_date(d)` | `is_future_date(this.expiry)` | 日期在未来 |
 
+### 比较函数
+
+| 函数 | 用法 | 说明 |
+|------|------|------|
+| `in_list(value, candidates)` | `in_list(this.status, ["active","pending"])` | 值是否在列表中 |
+
 ## API 校验
 
 启动时预编译，每次请求零编译开销：
@@ -473,13 +479,22 @@ reg.RegisterAll() // 注册 method + function 形式
 
 **Method 形式** — 校验 `this`：
 ```yaml
+let r = this.validate_schema(name: "payment", mode: "fast")
 let r = this.process_schema(name: "payment", mode: "fast")
 ```
 
 **Function 形式** — 动态数据源：
 ```yaml
+let r = validate_schema(data: this.payload, name: "payment")
 let r = process_schema(data: this.payload, name: "payment")
 ```
+
+**`validate_schema` vs `process_schema`：**
+
+| 插件 | 返回值 | 适用场景 |
+|------|--------|----------|
+| `validate_schema` | `{valid, errors}` | 只需要校验通过/失败 + 错误详情 |
+| `process_schema` | `{valid, errors, output}` | 还需要 `@blob()` 计算字段的值 |
 
 ## Registry 管理
 
@@ -490,6 +505,11 @@ reg.Has("user")                    // true
 reg.List()                         // ["user"]
 reg.Len()                          // 1
 reg.Unregister("user")             // 移除
+
+// Bloblang 插件注册
+reg.RegisterAll()                  // 注册 method + function 两种形式
+reg.RegisterMethods()              // 仅 method 形式：this.validate_schema(...) / this.process_schema(...)
+reg.RegisterFunctions()            // 仅 function 形式：validate_schema(data: ...) / process_schema(data: ...)
 ```
 
 ## 便捷 API
@@ -500,12 +520,26 @@ v := schemix.MustNew(cueSrc)                    // 出错 panic
 v, _ := schemix.NewWithContext(ctx, src)         // 共享 CUE context
 v, _ := schemix.NewFromValue(cueValue)           // 从预编译 CUE Value
 
-// 选项
+// 选项 — 自定义函数
 schemix.WithErrorFormatter(fn)                   // 自定义错误消息
 schemix.WithFunction(name, ctor)                 // 自定义函数（V1）
 schemix.WithFunctionV2(name, spec, ctor)         // 自定义函数（V2）
 schemix.WithMethod(name, fn)                     // 自定义方法（V1）
 schemix.WithMethodV2(name, spec, ctor)           // 自定义方法（V2）
+schemix.WithFuncMap(funcs)                       // 注入可复用的 FuncMap
+
+// 选项 — 覆盖内置校验器
+schemix.WithOverrideMethod(names...)             // 允许覆盖指定的内置方法
+schemix.WithOverrideFunc(names...)               // 允许覆盖指定的内置函数
+schemix.WithOverrideAll()                        // 关闭所有冲突检测
+
+// FuncMap 构造
+funcs := schemix.NewFuncMap(opts...)             // 构建可复用集合
+schemix.Func(name, ctor)                         // FuncMap 条目：函数（V1）
+schemix.FuncV2(name, spec, ctor)                 // FuncMap 条目：函数（V2）
+schemix.Method(name, fn)                         // FuncMap 条目：方法（V1）
+schemix.MethodV2(name, spec, ctor)               // FuncMap 条目：方法（V2）
+funcs.Err()                                      // 首个校验错误（valid 时为 nil）
 
 // 纯校验（快速路径 — 不分配 Output）
 valid, errs := v.Validate(data)

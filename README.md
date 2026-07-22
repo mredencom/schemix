@@ -184,6 +184,12 @@ All methods are available automatically in `@blob()` expressions — no registra
 | `is_past_date(d)` | `is_past_date(this.birthday)` | Date is in the past |
 | `is_future_date(d)` | `is_future_date(this.expiry)` | Date is in the future |
 
+### Comparison Functions
+
+| Function | Usage | Description |
+|----------|-------|-------------|
+| `in_list(value, candidates)` | `in_list(this.status, ["active","pending"])` | Returns true if value is in the list |
+
 ## API Validation
 
 Pre-compile at startup, validate per request with zero compilation overhead:
@@ -475,13 +481,22 @@ reg.RegisterAll() // method + function forms
 
 **Method form** — validates `this`:
 ```yaml
+let r = this.validate_schema(name: "payment", mode: "fast")
 let r = this.process_schema(name: "payment", mode: "fast")
 ```
 
 **Function form** — dynamic data source:
 ```yaml
+let r = validate_schema(data: this.payload, name: "payment")
 let r = process_schema(data: this.payload, name: "payment")
 ```
+
+**`validate_schema` vs `process_schema`:**
+
+| Plugin | Returns | Use When |
+|--------|---------|----------|
+| `validate_schema` | `{valid, errors}` | You only need pass/fail + error details |
+| `process_schema` | `{valid, errors, output}` | You also need computed field values from `@blob()` |
 
 ## Registry Management
 
@@ -492,6 +507,11 @@ reg.Has("user")                    // true
 reg.List()                         // ["user"]
 reg.Len()                          // 1
 reg.Unregister("user")             // remove
+
+// Bloblang plugin registration
+reg.RegisterAll()                  // register both method + function forms
+reg.RegisterMethods()              // method form only: this.validate_schema(...) / this.process_schema(...)
+reg.RegisterFunctions()            // function form only: validate_schema(data: ...) / process_schema(data: ...)
 ```
 
 ## Convenience API
@@ -502,12 +522,26 @@ v := schemix.MustNew(cueSrc)                    // panic on error
 v, _ := schemix.NewWithContext(ctx, src)         // shared CUE context
 v, _ := schemix.NewFromValue(cueValue)           // from pre-compiled CUE value
 
-// Options
+// Options — custom functions
 schemix.WithErrorFormatter(fn)                   // custom error messages
 schemix.WithFunction(name, ctor)                 // custom function (V1)
 schemix.WithFunctionV2(name, spec, ctor)         // custom function (V2)
 schemix.WithMethod(name, fn)                     // custom method (V1)
 schemix.WithMethodV2(name, spec, ctor)           // custom method (V2)
+schemix.WithFuncMap(funcs)                       // inject reusable FuncMap
+
+// Options — override built-in validators
+schemix.WithOverrideMethod(names...)             // allow overriding specific built-in methods
+schemix.WithOverrideFunc(names...)               // allow overriding specific built-in functions
+schemix.WithOverrideAll()                        // disable all conflict checks
+
+// FuncMap construction
+funcs := schemix.NewFuncMap(opts...)             // build reusable collection
+schemix.Func(name, ctor)                         // FuncMap entry: function (V1)
+schemix.FuncV2(name, spec, ctor)                 // FuncMap entry: function (V2)
+schemix.Method(name, fn)                         // FuncMap entry: method (V1)
+schemix.MethodV2(name, spec, ctor)               // FuncMap entry: method (V2)
+funcs.Err()                                      // first validation error (nil if valid)
 
 // Validation (fast path — no Output allocation)
 valid, errs := v.Validate(data)
