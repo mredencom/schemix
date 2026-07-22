@@ -7,7 +7,7 @@
 CUE 约束 + Bloblang 动态表达式，统一。
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/mredencom/schemix.svg)](https://pkg.go.dev/github.com/mredencom/schemix)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mredencom/schemix)](https://goreportcard.com/report/github.com/mredencom/schemix)
+[![golangci-lint](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
 [![CI](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
