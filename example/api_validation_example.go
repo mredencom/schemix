@@ -170,13 +170,13 @@ func formatErrorResponse(r schemix.Result) map[string]any {
 
 // apiHandler demonstrates how to use schemix in an actual HTTP handler.
 // Combines ErrorFormatter (clean messages) + FailFast (gateway) + HasCode (routing).
-func apiHandler(schema *schemix.Validator) http.HandlerFunc {
+func apiHandler(schema *schemix.Validator) http.HandlerFunc { //nolint:unused // example code
 	return func(w http.ResponseWriter, req *http.Request) {
 		// 1. Decode request body
 		var body map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error":   "invalid_json",
 				"message": err.Error(),
 			})
@@ -192,13 +192,13 @@ func apiHandler(schema *schemix.Validator) http.HandlerFunc {
 				status = http.StatusUnprocessableEntity // 422 for missing fields
 			}
 			w.WriteHeader(status)
-			json.NewEncoder(w).Encode(formatErrorResponse(r))
+			_ = json.NewEncoder(w).Encode(formatErrorResponse(r))
 			return
 		}
 
 		// 3. Use r.Output which contains computed fields (fee, etc.)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "success",
 			"data":   r.Output,
 		})
