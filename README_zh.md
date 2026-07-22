@@ -11,7 +11,6 @@ CUE 约束 + Bloblang 动态表达式，统一。
 [![Release](https://img.shields.io/github/v/release/mredencom/schemix)](https://github.com/mredencom/schemix/releases)
 [![Codecov](https://codecov.io/gh/mredencom/schemix/branch/main/graph/badge.svg)](https://codecov.io/gh/mredencom/schemix)
 [![CI](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
-[![golangci-lint](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [English](README.md) | [中文](README_zh.md)
