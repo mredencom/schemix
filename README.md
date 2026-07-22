@@ -7,8 +7,11 @@
 CUE constraints + Bloblang dynamic expressions, unified.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/mredencom/schemix.svg)](https://pkg.go.dev/github.com/mredencom/schemix)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mredencom/schemix)](https://goreportcard.com/report/github.com/mredencom/schemix)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/mredencom/schemix)](https://github.com/mredencom/schemix/blob/main/go.mod)
+[![Release](https://img.shields.io/github/v/release/mredencom/schemix)](https://github.com/mredencom/schemix/releases)
+[![Codecov](https://codecov.io/gh/mredencom/schemix/branch/main/graph/badge.svg)](https://codecov.io/gh/mredencom/schemix)
 [![CI](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
+[![golangci-lint](https://github.com/mredencom/schemix/actions/workflows/ci.yml/badge.svg)](https://github.com/mredencom/schemix/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [English](README.md) | [中文](README_zh.md)

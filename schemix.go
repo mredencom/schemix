@@ -230,7 +230,7 @@ func NewFromValue(schema cue.Value, opts ...Option) (*Validator, error) {
 	if err := schema.Err(); err != nil {
 		return nil, fmt.Errorf("CUE value error: %w", err)
 	}
-	return buildValidator(schema.Context(), schema, opts)
+	return buildValidator(cuecontext.New(), schema, opts)
 }
 
 // buildValidator is the shared constructor logic for all New* functions.

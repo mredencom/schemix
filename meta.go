@@ -27,7 +27,7 @@ func parsefieldMeta(val cue.Value, parse blobParser) fieldMeta {
 		value = strings.TrimSpace(value)
 		switch {
 		case key == metaPriority && value != "":
-			fmt.Sscanf(value, "%d", &meta.Priority)
+			_, _ = fmt.Sscanf(value, "%d", &meta.Priority)
 		case key == metaOptional:
 			meta.Optional = true
 		case key == metaConditional:
