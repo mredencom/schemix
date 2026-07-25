@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"cmp"
 	"math"
 	"testing"
 )
@@ -135,6 +136,33 @@ func TestFastpathThreeState(t *testing.T) {
 				t.Errorf("code = %v, want %v", code, tt.wantCode)
 			}
 		})
+	}
+}
+
+// TestCmpCompareSortOverflowSafe verifies that sortBlobRules uses cmp.Compare
+// instead of integer subtraction, preventing overflow on extreme priority values.
+func TestCmpCompareSortOverflowSafe(t *testing.T) {
+	rules := []blobRule{
+		{Path: "c", Meta: fieldMeta{Priority: math.MaxInt}},
+		{Path: "a", Meta: fieldMeta{Priority: math.MinInt}},
+		{Path: "b", Meta: fieldMeta{Priority: 0}},
+	}
+
+	sortBlobRules(rules)
+
+	// Expected order: MinInt < 0 < MaxInt
+	expected := []string{"a", "b", "c"}
+	for i, r := range rules {
+		if r.Path != expected[i] {
+			t.Errorf("rules[%d].Path = %q, want %q", i, r.Path, expected[i])
+		}
+	}
+
+	// Verify the old subtraction would have overflowed:
+	// math.MinInt - math.MaxInt would wrap positive, corrupting sort.
+	// We check that cmp.Compare gives the correct answer:
+	if cmp.Compare(math.MinInt, math.MaxInt) != -1 {
+		t.Error("cmp.Compare(MinInt, MaxInt) should be -1")
 	}
 }
 

@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 
@@ -22,6 +23,7 @@ type cueField struct {
 	hasBlob  bool            // has @blob attribute; absent input may be computed
 	isStruct bool            // IncompleteKind == StructKind
 	isList   bool            // IncompleteKind == ListKind
+	priority int             // @meta(priority=N), default 0
 	fast     *fastConstraint // Go-native fast check (nil = use CUE path)
 	children []cueField      // nested struct fields (pre-compiled recursively)
 }
@@ -363,6 +365,7 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			hasBlob:  blobAttr.Err() == nil,
 			isStruct: fieldSchema.IncompleteKind() == cue.StructKind,
 			isList:   fieldSchema.IncompleteKind() == cue.ListKind,
+			priority: extractFieldPriority(fieldSchema),
 		}
 
 		// Recursively compile nested struct fields
@@ -514,8 +517,24 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 		return result
 	}
 
+	// FailPriority: determine minFailedPriority from CUE errors and filter
+	minFailedPriority := math.MaxInt // math.MaxInt
 	if mode == FailPriority && !result.Valid {
-		return result
+		// Find the minimum priority among failed CUE fields
+		for _, e := range result.Errors {
+			p := v.fieldPriorityByPath(e.Path)
+			if p < minFailedPriority {
+				minFailedPriority = p
+			}
+		}
+		// Filter: keep only errors from the minimum failed priority group
+		filtered := result.Errors[:0]
+		for _, e := range result.Errors {
+			if v.fieldPriorityByPath(e.Path) == minFailedPriority {
+				filtered = append(filtered, e)
+			}
+		}
+		result.Errors = filtered
 	}
 
 	// Preserve the CUE-layer failures before Blob errors are appended. A rule on
@@ -541,6 +560,12 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 			}
 			currentPriority = meta.Priority
 			priorityHasError = false
+		}
+
+		// blobRules are sorted by priority, so once this boundary is crossed
+		// every remaining rule belongs to a later group.
+		if mode == FailPriority && minFailedPriority < math.MaxInt && meta.Priority > minFailedPriority {
+			break
 		}
 
 		// Field-level fail_fast
@@ -786,6 +811,15 @@ func (v *Validator) findCUEField(fields []cueField, path string) *cueField {
 		}
 	}
 	return nil
+}
+
+// fieldPriorityByPath looks up the priority of a field by its dot-path from cueFields.
+func (v *Validator) fieldPriorityByPath(path string) int {
+	f := v.findCUEField(v.cueFields, path)
+	if f != nil {
+		return f.priority
+	}
+	return 0
 }
 
 // validateCUEFields validates data against pre-compiled field descriptors.

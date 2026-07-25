@@ -1,8 +1,12 @@
 package schemix
 
 import (
+	"cmp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"cuelang.org/go/cue"
 )
 
 // getNestedValue retrieves a value from a nested map by dot-separated path.
@@ -114,10 +118,10 @@ func isEmpty(v any) bool {
 	}
 }
 
-// sortBlobRules sorts rules by priority (stable) using the standard library.
+// sortBlobRules sorts rules by priority (stable), overflow-safe via cmp.Compare.
 func sortBlobRules(rules []blobRule) {
 	slices.SortStableFunc(rules, func(a, b blobRule) int {
-		return a.Meta.Priority - b.Meta.Priority
+		return cmp.Compare(a.Meta.Priority, b.Meta.Priority)
 	})
 }
 
@@ -130,4 +134,24 @@ func extractIndex(errMsg string) string {
 		}
 	}
 	return ""
+}
+
+// extractFieldPriority reads the @meta(priority=N) value from a CUE field value.
+// Returns 0 (default priority) if no priority is specified or if parsing fails.
+func extractFieldPriority(fieldSchema cue.Value) int {
+	metaAttr := fieldSchema.Attribute(attrMeta)
+	if metaAttr.Err() != nil {
+		return 0
+	}
+	for i := range metaAttr.NumArgs() {
+		key, val := metaAttr.Arg(i)
+		key = strings.TrimSpace(key)
+		if key == metaPriority && val != "" {
+			p, err := strconv.Atoi(val)
+			if err == nil {
+				return p
+			}
+		}
+	}
+	return 0
 }
