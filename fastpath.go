@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 
 	"cuelang.org/go/cue"
@@ -34,16 +35,20 @@ type fastConstraint struct {
 	regex *regexp.Regexp
 
 	// Range constraint (implies numeric)
-	hasMin    bool
-	hasMax    bool
-	min       float64 // inclusive lower bound (or exclusive, see minExcl)
-	max       float64 // inclusive upper bound (or exclusive, see maxExcl)
-	minExcl   bool    // true = > (exclusive), false = >= (inclusive)
-	maxExcl   bool    // true = < (exclusive), false = <= (inclusive)
+	hasMin   bool
+	hasMax   bool
+	min      float64 // inclusive lower bound (or exclusive, see minExcl)
+	max      float64 // inclusive upper bound (or exclusive, see maxExcl)
+	minInt64 int64   // exact integer lower bound when useInt64 is true
+	maxInt64 int64   // exact integer upper bound when useInt64 is true
+	useInt64 bool    // integer ranges use exact arithmetic instead of float64
+	minExcl  bool    // true = > (exclusive), false = >= (inclusive)
+	maxExcl  bool    // true = < (exclusive), false = <= (inclusive)
 
 	// Enum constraint
 	stringEnums []string
 	intEnums    []int64
+	floatEnums  []float64
 }
 
 // extractFastConstraint analyzes a CUE field schema at compile time and
@@ -100,9 +105,9 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 	// Check for enum (disjunction of int literals)
 	if enums := extractIntEnums(schema); enums != nil {
 		return &fastConstraint{
-			kind:     constraintEnum,
+			kind:      constraintEnum,
 			expectInt: true,
-			intEnums: enums,
+			intEnums:  enums,
 		}
 	}
 
@@ -117,6 +122,14 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 
 // extractFloatConstraint handles float fields.
 func extractFloatConstraint(schema cue.Value) *fastConstraint {
+	// Check for float enum (disjunction of float literals)
+	if enums := extractFloatEnums(schema); enums != nil {
+		return &fastConstraint{
+			kind:        constraintEnum,
+			expectFloat: true,
+			floatEnums:  enums,
+		}
+	}
 	if fc := extractNumericRange(schema, false); fc != nil {
 		return fc
 	}
@@ -175,6 +188,29 @@ func extractIntEnums(v cue.Value) []int64 {
 	return enums
 }
 
+// extractFloatEnums tries to extract all float alternatives from a disjunction.
+func extractFloatEnums(v cue.Value) []float64 {
+	op, vals := v.Expr()
+	if op != cue.OrOp || len(vals) < 2 {
+		return nil
+	}
+
+	var enums []float64
+	for _, alt := range vals {
+		k := alt.IncompleteKind()
+		// Accept both float and int literals in a float enum disjunction
+		if k != cue.FloatKind && k != cue.IntKind && k != cue.NumberKind {
+			return nil
+		}
+		f, err := alt.Float64()
+		if err != nil {
+			return nil
+		}
+		enums = append(enums, f)
+	}
+	return enums
+}
+
 // extractRegex tries to extract a regex pattern from a bound expression (=~"pattern").
 func extractRegex(v cue.Value) *regexp.Regexp {
 	op, vals := v.Expr()
@@ -207,84 +243,91 @@ func extractRegex(v cue.Value) *regexp.Regexp {
 // extractNumericRange tries to extract range bounds from an int/float field.
 // e.g. int & >0 & <=100
 // CUE Expr structure for "int & >=0 & <=150":
-//   Top: AndOp, vals = [int&>=0 (nested And), <=150 (LessThanEqualOp)]
-//   Each bound op has subVals[0] as the bound value.
+//
+//	Top: AndOp, vals = [int&>=0 (nested And), <=150 (LessThanEqualOp)]
+//	Each bound op has subVals[0] as the bound value.
 func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 	op, vals := v.Expr()
 
-	if op == cue.NoOp || len(vals) == 0 {
+	if op == cue.NoOp || len(vals) == 0 || op != cue.AndOp {
 		return nil
 	}
 
-	// Must be a conjunction for ranges
-	if op != cue.AndOp {
-		return nil
-	}
-
-	fc := &fastConstraint{kind: constraintRange}
+	fc := &fastConstraint{kind: constraintRange, useInt64: isInt}
 	if isInt {
 		fc.expectInt = true
 	} else {
 		fc.expectFloat = true
 	}
 
-	hasBound := extractBoundsRecursive(vals, fc)
-	if !hasBound {
+	hasBound, exact := extractBoundsRecursive(vals, fc)
+	if !hasBound || !exact {
 		return nil
 	}
 	return fc
 }
 
 // extractBoundsRecursive traverses the expression tree to find all bound operators.
-func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) bool {
-	hasBound := false
+// exact is false when an integer bound cannot be represented as int64, which
+// disables the fast path so CUE remains the correctness oracle.
+func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exact bool) {
+	exact = true
 	for _, sub := range vals {
 		subOp, subVals := sub.Expr()
 		switch subOp {
-		case cue.GreaterThanOp:
-			if len(subVals) >= 1 {
-				if n, err := numVal(subVals[0]); err == nil {
-					fc.hasMin = true
-					fc.min = n
-					fc.minExcl = true
-					hasBound = true
-				}
+		case cue.GreaterThanOp, cue.GreaterThanEqualOp, cue.LessThanOp, cue.LessThanEqualOp:
+			if len(subVals) == 0 {
+				continue
 			}
-		case cue.GreaterThanEqualOp:
-			if len(subVals) >= 1 {
-				if n, err := numVal(subVals[0]); err == nil {
-					fc.hasMin = true
-					fc.min = n
-					fc.minExcl = false
-					hasBound = true
-				}
+			if !setFastRangeBound(fc, subOp, subVals[0]) {
+				return hasBound, false
 			}
-		case cue.LessThanOp:
-			if len(subVals) >= 1 {
-				if n, err := numVal(subVals[0]); err == nil {
-					fc.hasMax = true
-					fc.max = n
-					fc.maxExcl = true
-					hasBound = true
-				}
-			}
-		case cue.LessThanEqualOp:
-			if len(subVals) >= 1 {
-				if n, err := numVal(subVals[0]); err == nil {
-					fc.hasMax = true
-					fc.max = n
-					fc.maxExcl = false
-					hasBound = true
-				}
-			}
+			hasBound = true
 		case cue.AndOp:
-			// Nested conjunction — recurse
-			if extractBoundsRecursive(subVals, fc) {
-				hasBound = true
+			nestedBound, nestedExact := extractBoundsRecursive(subVals, fc)
+			if !nestedExact {
+				return hasBound || nestedBound, false
 			}
+			hasBound = hasBound || nestedBound
 		}
 	}
-	return hasBound
+	return hasBound, true
+}
+
+func setFastRangeBound(fc *fastConstraint, op cue.Op, bound cue.Value) bool {
+	if fc.useInt64 {
+		n, err := bound.Int64()
+		if err != nil {
+			return false
+		}
+		switch op {
+		case cue.GreaterThanOp, cue.GreaterThanEqualOp:
+			fc.hasMin = true
+			fc.minInt64 = n
+			fc.minExcl = op == cue.GreaterThanOp
+		case cue.LessThanOp, cue.LessThanEqualOp:
+			fc.hasMax = true
+			fc.maxInt64 = n
+			fc.maxExcl = op == cue.LessThanOp
+		}
+		return true
+	}
+
+	n, err := numVal(bound)
+	if err != nil {
+		return false
+	}
+	switch op {
+	case cue.GreaterThanOp, cue.GreaterThanEqualOp:
+		fc.hasMin = true
+		fc.min = n
+		fc.minExcl = op == cue.GreaterThanOp
+	case cue.LessThanOp, cue.LessThanEqualOp:
+		fc.hasMax = true
+		fc.max = n
+		fc.maxExcl = op == cue.LessThanOp
+	}
+	return true
 }
 
 // numVal extracts a float64 from a CUE numeric value.
@@ -299,9 +342,11 @@ func numVal(v cue.Value) (float64, error) {
 }
 
 // validateFast performs pure-Go validation of a field value against a fastConstraint.
-// Returns (valid bool, errorCode ErrorCode, detail string).
-// If valid is true, errorCode and detail are meaningless.
-func validateFast(fc *fastConstraint, val any) (bool, ErrorCode, string) {
+// Returns (handled, valid, code, detail):
+//   - handled=false: the fast path cannot determine the result; caller MUST fall through to CUE Unify
+//   - handled=true, valid=true: field passes the constraint
+//   - handled=true, valid=false: field fails with the given code and detail
+func validateFast(fc *fastConstraint, val any) (handled bool, valid bool, code ErrorCode, detail string) {
 	switch fc.kind {
 	case constraintType:
 		return validateFastType(fc, val)
@@ -312,134 +357,225 @@ func validateFast(fc *fastConstraint, val any) (bool, ErrorCode, string) {
 	case constraintEnum:
 		return validateFastEnum(fc, val)
 	default:
-		return true, "", "" // should not reach here
+		return true, true, "", "" // should not reach here
 	}
 }
 
-func validateFastType(fc *fastConstraint, val any) (bool, ErrorCode, string) {
+func validateFastType(fc *fastConstraint, val any) (bool, bool, ErrorCode, string) {
 	switch {
 	case fc.expectString:
 		if _, ok := val.(string); !ok {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
 		}
 	case fc.expectInt:
-		if !isIntLike(val) {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
-		}
+		return validateFastIntType(val)
 	case fc.expectFloat:
-		if !isNumeric(val) {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val)
-		}
+		return validateFastFloatType(val)
 	case fc.expectNumber:
-		if !isNumeric(val) {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val)
-		}
+		return validateFastNumberType(val)
 	case fc.expectBool:
 		if _, ok := val.(bool); !ok {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected bool, got %T", val)
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected bool, got %T", val)
 		}
 	}
-	return true, "", ""
+	return true, true, "", ""
 }
 
-func validateFastRegex(fc *fastConstraint, val any) (bool, ErrorCode, string) {
+// validateFastIntType implements the int type guard:
+// - signed int types: handled+valid
+// - float32/float64: handled+invalid (E1T01 — float on int)
+// - uint/uint*: NOT handled → fall through to CUE
+func validateFastIntType(val any) (bool, bool, ErrorCode, string) {
+	switch val.(type) {
+	case int, int8, int16, int32, int64:
+		return true, true, "", ""
+	case float32, float64:
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
+	default:
+		// uint types and others — cannot precisely handle, fall through to CUE
+		return false, false, "", ""
+	}
+}
+
+// validateFastFloatType validates float type with NaN/Inf rejection.
+func validateFastFloatType(val any) (bool, bool, ErrorCode, string) {
+	switch v := val.(type) {
+	case float64:
+		return validateFiniteFloat(v, val, "float")
+	case float32:
+		return validateFiniteFloat(float64(v), val, "float")
+	case int, int8, int16, int32, int64:
+		return true, true, "", "" // int is valid for float
+	default:
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val)
+	}
+}
+
+// validateFastNumberType validates number (int or float) with NaN/Inf rejection.
+func validateFastNumberType(val any) (bool, bool, ErrorCode, string) {
+	switch v := val.(type) {
+	case float64:
+		return validateFiniteFloat(v, val, "number")
+	case float32:
+		return validateFiniteFloat(float64(v), val, "number")
+	case int, int8, int16, int32, int64:
+		return true, true, "", ""
+	default:
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val)
+	}
+}
+
+func validateFiniteFloat(n float64, original any, expected string) (bool, bool, ErrorCode, string) {
+	if math.IsNaN(n) {
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected finite %s, got %v", expected, original)
+	}
+	if math.IsInf(n, 0) {
+		return true, false, CodeRangeViolation, fmt.Sprintf("%s value out of finite range: %v", expected, original)
+	}
+	return true, true, "", ""
+}
+
+func validateFastRegex(fc *fastConstraint, val any) (bool, bool, ErrorCode, string) {
 	s, ok := val.(string)
 	if !ok {
-		return false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
 	}
 	if !fc.regex.MatchString(s) {
-		return false, CodeFormatMismatch, fmt.Sprintf("does not match %s", fc.regex.String())
+		return true, false, CodeFormatMismatch, fmt.Sprintf("does not match %s", fc.regex.String())
 	}
-	return true, "", ""
+	return true, true, "", ""
 }
 
-func validateFastRange(fc *fastConstraint, val any) (bool, ErrorCode, string) {
+func validateFastRange(fc *fastConstraint, val any) (bool, bool, ErrorCode, string) {
+	if fc.expectInt {
+		n, ok := toInt64(val)
+		if ok {
+			return validateFastInt64Range(fc, n)
+		}
+		switch val.(type) {
+		case float32, float64:
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
+		default:
+			// Unsigned integers and unknown numeric representations fall back to CUE.
+			return false, false, "", ""
+		}
+	}
+
 	n, ok := toFloat64(val)
 	if !ok {
-		if fc.expectInt {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
-		}
-		return false, CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val)
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val)
+	}
+	if math.IsNaN(n) {
+		return true, false, CodeTypeMismatch, fmt.Sprintf("expected finite number, got %v", val)
+	}
+	if math.IsInf(n, 0) {
+		return true, false, CodeRangeViolation, fmt.Sprintf("value %v out of finite range", val)
 	}
 
 	if fc.hasMin {
-		if fc.minExcl {
-			if n <= fc.min {
-				return false, CodeRangeViolation, fmt.Sprintf("value %v out of bound >%v", val, fc.min)
-			}
-		} else {
-			if n < fc.min {
-				return false, CodeRangeViolation, fmt.Sprintf("value %v out of bound >=%v", val, fc.min)
-			}
+		if fc.minExcl && n <= fc.min {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %v out of bound >%v", val, fc.min)
+		}
+		if !fc.minExcl && n < fc.min {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %v out of bound >=%v", val, fc.min)
 		}
 	}
-
 	if fc.hasMax {
-		if fc.maxExcl {
-			if n >= fc.max {
-				return false, CodeRangeViolation, fmt.Sprintf("value %v out of bound <%v", val, fc.max)
-			}
-		} else {
-			if n > fc.max {
-				return false, CodeRangeViolation, fmt.Sprintf("value %v out of bound <=%v", val, fc.max)
-			}
+		if fc.maxExcl && n >= fc.max {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %v out of bound <%v", val, fc.max)
+		}
+		if !fc.maxExcl && n > fc.max {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %v out of bound <=%v", val, fc.max)
 		}
 	}
-
-	return true, "", ""
+	return true, true, "", ""
 }
 
-func validateFastEnum(fc *fastConstraint, val any) (bool, ErrorCode, string) {
+func validateFastInt64Range(fc *fastConstraint, n int64) (bool, bool, ErrorCode, string) {
+	if !fc.useInt64 {
+		return false, false, "", ""
+	}
+	if fc.hasMin {
+		if fc.minExcl && n <= fc.minInt64 {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %d out of bound >%d", n, fc.minInt64)
+		}
+		if !fc.minExcl && n < fc.minInt64 {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %d out of bound >=%d", n, fc.minInt64)
+		}
+	}
+	if fc.hasMax {
+		if fc.maxExcl && n >= fc.maxInt64 {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %d out of bound <%d", n, fc.maxInt64)
+		}
+		if !fc.maxExcl && n > fc.maxInt64 {
+			return true, false, CodeRangeViolation, fmt.Sprintf("value %d out of bound <=%d", n, fc.maxInt64)
+		}
+	}
+	return true, true, "", ""
+}
+
+func validateFastEnum(fc *fastConstraint, val any) (bool, bool, ErrorCode, string) {
 	if fc.stringEnums != nil {
 		s, ok := val.(string)
 		if !ok {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val)
 		}
 		for _, e := range fc.stringEnums {
 			if s == e {
-				return true, "", ""
+				return true, true, "", ""
 			}
 		}
-		return false, CodeEnumInvalid, fmt.Sprintf("value %q not in enum", s)
+		return true, false, CodeEnumInvalid, fmt.Sprintf("value %q not in enum", s)
 	}
 
 	if fc.intEnums != nil {
-		n, ok := toInt64(val)
-		if !ok {
-			return false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
+		// Type guard for int enums
+		switch val.(type) {
+		case int, int8, int16, int32, int64:
+			// ok — proceed
+		case float32, float64:
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected int, got %T", val)
+		default:
+			// uint types — fall through to CUE
+			return false, false, "", ""
 		}
+		n, _ := toInt64(val)
 		for _, e := range fc.intEnums {
 			if n == e {
-				return true, "", ""
+				return true, true, "", ""
 			}
 		}
-		return false, CodeEnumInvalid, fmt.Sprintf("value %v not in enum", val)
+		return true, false, CodeEnumInvalid, fmt.Sprintf("value %v not in enum", val)
 	}
 
-	return true, "", ""
+	if fc.floatEnums != nil {
+		n, ok := toFloat64(val)
+		if !ok {
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val)
+		}
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return true, false, CodeTypeMismatch, fmt.Sprintf("expected finite number, got %v", val)
+		}
+		for _, e := range fc.floatEnums {
+			if n == e {
+				return true, true, "", ""
+			}
+		}
+		return true, false, CodeEnumInvalid, fmt.Sprintf("value %v not in enum", val)
+	}
+
+	return true, true, "", ""
 }
 
 // --- helpers ---
 
-func isIntLike(v any) bool {
-	switch v.(type) {
-	case int, int8, int16, int32, int64:
-		return true
-	}
-	return false
-}
-
-func isNumeric(v any) bool {
-	switch v.(type) {
-	case int, int8, int16, int32, int64, float32, float64:
-		return true
-	}
-	return false
-}
-
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case int:
+		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
 		return float64(n), true
 	case int64:
 		return float64(n), true
@@ -457,10 +593,14 @@ func toInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int:
 		return int64(n), true
-	case int64:
-		return n, true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
 	case int32:
 		return int64(n), true
+	case int64:
+		return n, true
 	}
 	return 0, false
 }

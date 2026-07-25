@@ -754,17 +754,20 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 
 		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
 		if f.fast != nil {
-			valid, code, detail := validateFast(f.fast, goVal)
-			if !valid {
-				result.Valid = false
-				result.Errors = append(result.Errors, ValidationError{
-					Code:    code,
-					Path:    f.path,
-					Type:    TypeCUE,
-					Message: v.formatMessage(code, f.path, detail),
-				})
+			handled, valid, code, detail := validateFast(f.fast, goVal)
+			if handled {
+				if !valid {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    code,
+						Path:    f.path,
+						Type:    TypeCUE,
+						Message: v.formatMessage(code, f.path, detail),
+					})
+				}
+				continue
 			}
-			continue
+			// handled=false: fall through to CUE Unify
 		}
 
 		// Only now do we touch CUE for actual constraint validation
