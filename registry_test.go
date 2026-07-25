@@ -295,12 +295,11 @@ func TestInvalidMode(t *testing.T) {
 		t.Fatalf("register methods: %v", err)
 	}
 
-	data := map[string]any{"name": "Alice", "age": int64(30)}
-
-	// Invalid mode should still work, defaulting to "all"
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema", mode: "invalid")`, data)
-	if r["valid"] != true {
-		t.Errorf("expected valid=true with invalid mode (defaults to all), got %v", r["valid"])
+	// Invalid mode now causes a construction-time error (E0C01 contract)
+	env := bloblang.GlobalEnvironment()
+	_, err := env.Parse(`root = this.validate_schema(name: "test_schema", mode: "invalid")`)
+	if err == nil {
+		t.Fatal("expected error from mapping construction with invalid mode, got nil")
 	}
 }
 

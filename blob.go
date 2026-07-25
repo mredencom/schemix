@@ -84,15 +84,17 @@ func (r *Registry) Len() int {
 	return n
 }
 
-// parseFailMode converts a mode string to FailMode. Defaults to FailAll.
-func parseFailMode(mode string) FailMode {
+// parseFailMode converts a mode string to FailMode. Returns error for unrecognized values.
+func parseFailMode(mode string) (FailMode, error) {
 	switch mode {
+	case ModeAll:
+		return FailAll, nil
 	case ModeFast:
-		return FailFast
+		return FailFast, nil
 	case ModePriority:
-		return FailPriority
+		return FailPriority, nil
 	default:
-		return FailAll
+		return 0, fmt.Errorf("invalid mode %q: must be %q, %q, or %q", mode, ModeAll, ModeFast, ModePriority)
 	}
 }
 
@@ -143,7 +145,10 @@ func (r *Registry) RegisterMethods() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
 				result := v.ProcessWithMode(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
@@ -173,7 +178,10 @@ func (r *Registry) RegisterMethods() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
 				result := v.ProcessWithMode(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
@@ -224,7 +232,10 @@ func (r *Registry) RegisterFunctions() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return func(ctx *bloblang.ExecContext) (any, error) {
 				dataRaw, err := ctx.Exec(dataFn)
 				if err != nil {
@@ -267,7 +278,10 @@ func (r *Registry) RegisterFunctions() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return func(ctx *bloblang.ExecContext) (any, error) {
 				dataRaw, err := ctx.Exec(dataFn)
 				if err != nil {

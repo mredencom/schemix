@@ -12,6 +12,7 @@ const (
 	TypeCUE      = "cue"
 	TypeBloblang = "bloblang"
 	TypeMeta     = "meta"
+	TypeConfig   = "config"
 )
 
 // --- Internal constants below (unexported) ---

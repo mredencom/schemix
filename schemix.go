@@ -467,7 +467,23 @@ func (v *Validator) Process(data map[string]any) Result {
 
 // ProcessWithMode performs validation and value computation with the specified FailMode.
 func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
+	if err := validateFailMode(mode); err != nil {
+		return Result{
+			Valid:  false,
+			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
+		}
+	}
 	return v.processInternal(data, mode, true)
+}
+
+// validateFailMode returns an error if mode is not a recognized FailMode value.
+func validateFailMode(mode FailMode) error {
+	switch mode {
+	case FailAll, FailFast, FailPriority:
+		return nil
+	default:
+		return fmt.Errorf("invalid FailMode(%d): must be FailAll, FailFast, or FailPriority", int(mode))
+	}
 }
 
 // processInternal is the unified validation/processing engine.
