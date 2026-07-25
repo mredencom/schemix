@@ -5,7 +5,10 @@ import "testing"
 func TestBuiltinMethod_IsEmail(t *testing.T) {
 	v := MustNew(`{ email: string, check: bool @blob(this.email.is_email()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"alice@example.com", true},
 		{"user.name+tag@domain.co", true},
 		{"invalid", false},
@@ -24,11 +27,14 @@ func TestBuiltinMethod_IsEmail(t *testing.T) {
 func TestBuiltinMethod_IsURL(t *testing.T) {
 	v := MustNew(`{ url: string, check: bool @blob(this.url.is_url()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"https://example.com", true},
 		{"http://localhost:8080/path", true},
 		{"ftp://files.example.com/doc.pdf", true},
-		{"example.com", false},  // no scheme
+		{"example.com", false}, // no scheme
 		{"not a url", false},
 		{"", false},
 	}
@@ -43,7 +49,10 @@ func TestBuiltinMethod_IsURL(t *testing.T) {
 func TestBuiltinMethod_IsUUID(t *testing.T) {
 	v := MustNew(`{ id: string, check: bool @blob(this.id.is_uuid()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"550e8400-e29b-41d4-a716-446655440000", true},
 		{"550E8400-E29B-41D4-A716-446655440000", true},
 		{"not-a-uuid", false},
@@ -101,7 +110,10 @@ func TestBuiltinMethod_IsIP(t *testing.T) {
 func TestBuiltinMethod_LuhnValid(t *testing.T) {
 	v := MustNew(`{ pan: string, check: bool @blob(this.pan.luhn_valid()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"4111111111111111", true},  // Visa test card
 		{"5500000000000004", true},  // Mastercard test card
 		{"6011000000000004", true},  // Discover test card
@@ -121,7 +133,10 @@ func TestBuiltinMethod_LuhnValid(t *testing.T) {
 func TestBuiltinMethod_NotBlank(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.not_blank()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"hello", true},
 		{" x ", true},
 		{"", false},
@@ -139,7 +154,10 @@ func TestBuiltinMethod_NotBlank(t *testing.T) {
 func TestBuiltinMethod_IsNumeric(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.is_numeric()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"12345", true},
 		{"0", true},
 		{"12.34", false},
@@ -157,7 +175,10 @@ func TestBuiltinMethod_IsNumeric(t *testing.T) {
 func TestBuiltinMethod_IsAlpha(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.is_alpha()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"Hello", true},
 		{"abc", true},
 		{"abc123", false},
@@ -175,7 +196,10 @@ func TestBuiltinMethod_IsAlpha(t *testing.T) {
 func TestBuiltinMethod_IsAlphanumeric(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.is_alpha_num()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"Hello123", true},
 		{"abc", true},
 		{"123", true},
@@ -194,7 +218,10 @@ func TestBuiltinMethod_IsAlphanumeric(t *testing.T) {
 func TestBuiltinMethod_IsJSON(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.is_json()) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{`{"key":"value"}`, true},
 		{`[1,2,3]`, true},
 		{`"hello"`, true},
@@ -213,7 +240,10 @@ func TestBuiltinMethod_IsJSON(t *testing.T) {
 func TestBuiltinMethod_Between(t *testing.T) {
 	v := MustNew(`{ n: int, check: bool @blob(this.n.between(min: 1, max: 100)) }`)
 
-	tests := []struct{ input int64; valid bool }{
+	tests := []struct {
+		input int64
+		valid bool
+	}{
 		{1, true},
 		{50, true},
 		{100, true},
@@ -232,7 +262,10 @@ func TestBuiltinMethod_Between(t *testing.T) {
 func TestBuiltinMethod_LenBetween(t *testing.T) {
 	v := MustNew(`{ s: string, check: bool @blob(this.s.len_between(min: 3, max: 10)) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"abc", true},
 		{"hello", true},
 		{"0123456789", true},
@@ -251,7 +284,10 @@ func TestBuiltinMethod_LenBetween(t *testing.T) {
 func TestBuiltinFunc_IsValidDate(t *testing.T) {
 	v := MustNew(`{ d: string, check: bool @blob(is_valid_date(this.d)) }`)
 
-	tests := []struct{ input string; valid bool }{
+	tests := []struct {
+		input string
+		valid bool
+	}{
 		{"2024-01-15", true},
 		{"2024-01-15T10:30:00Z", true},
 		{"2024/01/15", true},

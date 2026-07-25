@@ -247,9 +247,9 @@ func TestValidate_ReportsErrors(t *testing.T) {
 }
 
 // TestValidate_WithBlob verifies that Validate() correctly handles @blob fields:
-// - bool-returning @blob rules still validate (can fail)
-// - non-bool (computed) @blob rules execute but Output is irrelevant since
-//   Validate() doesn't return Output anyway.
+//   - bool-returning @blob rules still validate (can fail)
+//   - non-bool (computed) @blob rules execute but Output is irrelevant since
+//     Validate() doesn't return Output anyway.
 func TestValidate_WithBlob(t *testing.T) {
 	v := MustNew(`{
 		pan:      =~"^[0-9]{16}$"
