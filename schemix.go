@@ -19,7 +19,7 @@ type cueField struct {
 	schema   cue.Value       // pre-resolved schema value
 	optional bool            // whether the field is optional
 	nullable bool            // schema allows null (e.g. `null | string`)
-	hasBlob  bool            // has @blob attribute — skip CUE validation (optimization #1)
+	hasBlob  bool            // has @blob attribute; absent input may be computed
 	isStruct bool            // IncompleteKind == StructKind
 	isList   bool            // IncompleteKind == ListKind
 	fast     *fastConstraint // Go-native fast check (nil = use CUE path)
@@ -488,11 +488,16 @@ func validateFailMode(mode FailMode) error {
 
 // processInternal is the unified validation/processing engine.
 // When needOutput is false, it skips deepCopy and all Output mutations for performance.
-func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) Result {
-	result := Result{
+func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) (result Result) {
+	result = Result{
 		Valid:  true,
 		Errors: []ValidationError{},
 	}
+	defer func() {
+		if !result.Valid {
+			result.Output = nil
+		}
+	}()
 
 	if needOutput {
 		result.Output = deepCopy(data)
@@ -513,6 +518,10 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 		return result
 	}
 
+	// Preserve the CUE-layer failures before Blob errors are appended. A rule on
+	// the same field must never execute after its CUE constraint has failed.
+	cueErrors := append([]ValidationError(nil), result.Errors...)
+
 	// Layer 2: @blob + @meta rules
 	failedPaths := map[string]bool{}
 	currentPriority := -1
@@ -521,6 +530,10 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	for _, rule := range v.blobRules {
 		meta := rule.Meta
 
+		if hasValidationErrorAtPath(cueErrors, rule.Path) {
+			failedPaths[rule.Path] = true
+			continue
+		}
 		// FailPriority: check priority group transition
 		if mode == FailPriority && meta.Priority > currentPriority {
 			if priorityHasError {
@@ -693,7 +706,16 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 					}
 				}
 			} else {
-				// Value mode: write computed result to output only when needed
+				// Value mode: write computed result to output only when needed.
+				// Strict type contract: verify the computed value matches the CUE field type.
+				if !v.checkBlobResultType(rule.Path, res, &result, mode) {
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+					continue
+				}
 				if result.Output != nil {
 					setNestedValue(result.Output, rule.Path, res)
 				}
@@ -704,21 +726,78 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	return result
 }
 
+func hasValidationErrorAtPath(errors []ValidationError, path string) bool {
+	for _, validationErr := range errors {
+		if validationErr.Path == path || strings.HasPrefix(validationErr.Path, path+".") ||
+			strings.HasPrefix(validationErr.Path, path+"[") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkBlobResultType verifies that a non-bool @blob result matches the
+// declared CUE field type. Returns true if type-compatible, false if a
+// E2T01 error was emitted (strict type contract).
+func (v *Validator) checkBlobResultType(path string, val any, result *Result, mode FailMode) bool {
+	// Look up the field's CUE schema
+	field := v.findCUEField(v.cueFields, path)
+	if field == nil {
+		// No CUE field found — cannot type-check (should not happen for well-formed schemas)
+		return true
+	}
+
+	// Encode the computed value and unify with the field schema
+	encoded := v.ctx.Encode(val)
+	unified := field.schema.Unify(encoded)
+	if err := unified.Validate(cue.Concrete(true)); err != nil {
+		detail := fmt.Sprintf("@blob result type mismatch: computed %T, field expects %s",
+			val, cueKindToString(field.schema.IncompleteKind()))
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Code:    CodeBlobTypeMismatch,
+			Path:    path,
+			Type:    TypeBloblang,
+			Message: v.formatMessage(CodeBlobTypeMismatch, path, detail),
+		})
+		return false
+	}
+	return true
+}
+
+// findCUEField searches the pre-compiled field tree for a field at the given dot-path.
+func (v *Validator) findCUEField(fields []cueField, path string) *cueField {
+	parts := strings.Split(path, ".")
+	current := fields
+	for i, part := range parts {
+		found := false
+		for j := range current {
+			if current[j].name == part {
+				if i == len(parts)-1 {
+					return &current[j]
+				}
+				current = current[j].children
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+	return nil
+}
+
 // validateCUEFields validates data against pre-compiled field descriptors.
 // This is significantly faster than the old validateCUERecursive because:
-//   - Optimization #1: @blob fields are skipped BEFORE Unify (zero cost)
-//   - Optimization #2: Go map check before CUE LookupPath (fast path for missing fields)
-//   - Optimization #3: Field metadata is pre-compiled, no schema.Fields() iteration at runtime
+//   - Optimization #1: Go map check before CUE LookupPath (fast path for missing fields)
+//   - Optimization #2: Field metadata is pre-compiled, no schema.Fields() iteration at runtime
+//   - Correctness: present @blob fields still satisfy their CUE constraints before Blob execution
 func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData map[string]any, result *Result) {
 	for i := range fields {
 		f := &fields[i]
 
-		// Optimization #1: skip @blob fields entirely — they are validated by Bloblang layer
-		if f.hasBlob {
-			continue
-		}
-
-		// Optimization #2: fast Go-level existence check before touching CUE
+		// Fast Go-level existence check before touching CUE.
 		// Use field name (not full path) since rawData is the current level map
 		goVal, exists := rawData[f.name]
 		if !exists {
