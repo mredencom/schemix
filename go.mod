@@ -3,7 +3,7 @@ module github.com/mredencom/schemix
 go 1.26.5
 
 require (
-	cuelang.org/go v0.17.0
+	cuelang.org/go v0.17.1
 	github.com/warpstreamlabs/bento v1.19.0
 )
 
