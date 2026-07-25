@@ -85,7 +85,7 @@ graph TD
 go get github.com/mredencom/schemix@latest
 ```
 
-> **要求：** Go 1.22+
+> **要求：** Go 1.26.5 或更高版本
 
 ## 快速开始
 
@@ -446,13 +446,17 @@ for _, f := range fields {
 |------|----------|------|
 | `FailAll` | 表单校验 | 收集所有错误 |
 | `FailFast` | API 网关 | 遇到第一个错误即停 |
-| `FailPriority` | 分层校验 | 优先级组隔离 |
+| `FailPriority` | 分层校验 | 收集首个失败优先级组内的 CUE + Blob 错误，并跳过更高组 |
 
 ```go
 r := v.ProcessWithMode(data, schemix.FailFast)     // 最多 1 个错误
 r := v.ProcessWithMode(data, schemix.FailAll)      // 所有错误
-r := v.ProcessWithMode(data, schemix.FailPriority) // p1 失败 → 跳过 p2+
+r := v.ProcessWithMode(data, schemix.FailPriority) // 仅首个失败组
 ```
+
+> **处理契约：** 同一 `FailPriority` 组内的 CUE 与 Blob 规则都会执行并收集错误；
+> 该组失败后，不再执行更高优先级编号的组。任何无效结果均满足 `Output == nil`。
+> 非 bool 的 `@blob()` 结果必须符合字段 schema，否则返回 `E2T01`。
 
 ## 错误码
 
@@ -460,6 +464,7 @@ r := v.ProcessWithMode(data, schemix.FailPriority) // p1 失败 → 跳过 p2+
 
 | 常量 | 码 | 层 | 含义 |
 |------|----|----|------|
+| `CodeConfigError` | E0C01 | Config | 无效配置（如未定义 FailMode） |
 | `CodeFormatMismatch` | E1F01 | CUE | 正则格式不匹配 |
 | `CodeTypeMismatch` | E1T01 | CUE | 类型错误 |
 | `CodeEnumInvalid` | E1E01 | CUE | 枚举值非法 |
@@ -469,14 +474,17 @@ r := v.ProcessWithMode(data, schemix.FailPriority) // p1 失败 → 跳过 p2+
 | `CodeCUEOther` | E1X01 | CUE | 其他 CUE 错误 |
 | `CodeBizRuleFailed` | E2B01 | Blob | 业务规则返回 false |
 | `CodeExprExecError` | E2X01 | Blob | 表达式执行错误 |
+| `CodeBlobTypeMismatch` | E2T01 | Blob | @blob 类型契约违规 |
 | `CodeCondRequired` | E3C01 | Meta | 条件必填未满足 |
+| `CodeMetaRuntimeError` | E3X01 | Meta | Meta 表达式运行时错误 |
 
 ## Bloblang 集成
 
 ```go
 reg := schemix.NewRegistry()
 reg.Register("payment", cueSrc)
-reg.RegisterAll() // 注册 method + function 形式
+env := bloblang.NewEnvironment()
+reg.RegisterAllTo(env) // 作用域内注册 method + function
 ```
 
 **Method 形式** — 校验 `this`：
@@ -508,7 +516,13 @@ reg.List()                         // ["user"]
 reg.Len()                          // 1
 reg.Unregister("user")             // 移除
 
-// Bloblang 插件注册
+// 作用域注册（推荐）
+env := bloblang.NewEnvironment()
+reg.RegisterAllTo(env)             // 注册 method + function 到指定 env
+reg.RegisterMethodsTo(env)         // 仅 method 形式到指定 env
+reg.RegisterFunctionsTo(env)       // 仅 function 形式到指定 env
+
+// 已废弃的全局注册（使用 GlobalEnvironment；重复注册会返回错误）
 reg.RegisterAll()                  // 注册 method + function 两种形式
 reg.RegisterMethods()              // 仅 method 形式：this.validate_schema(...) / this.process_schema(...)
 reg.RegisterFunctions()            // 仅 function 形式：validate_schema(data: ...) / process_schema(data: ...)
@@ -556,21 +570,24 @@ fields := v.Fields()                             // []FieldInfo
 
 ## 性能基准
 
-Apple M4, Go 1.26 — 6 字段（3 CUE + 3 @blob）：
+Apple M4, Go 1.26.5 — 6 字段（3 CUE + 3 @blob）：
 
 | 操作 | 耗时 | 内存 | 分配次数 |
 |------|------|------|----------|
-| `New`（编译） | 730 µs | 809 KB | 22260 |
-| `Process`（合法） | **4.9 µs** | 4.0 KB | 61 |
-| `Process`（非法） | 5.2 µs | 4.7 KB | 75 |
-| `Process`（嵌套） | 45 µs | 40 KB | 456 |
-| `Validate`（无输出） | **4.1 µs** | 3.6 KB | 57 |
-| `Process`（并行，10 核） | **2.2 µs** | 4.0 KB | 61 |
-| `ValidateFields`（快速路径） | 177 ns | 0 B | 0 |
-| `Registry.Get` | 8.3 ns | 0 B | 0 |
+| `New`（编译） | 441 µs | 791 KiB | 22275 |
+| `Process`（合法） | **7.07 µs** | 15.04 KiB | 125 |
+| `Process`（非法） | 7.67 µs | 15.91 KiB | 141 |
+| `Process`（嵌套） | 30.24 µs | 45.43 KiB | 491 |
+| `Validate`（无输出） | **6.48 µs** | 14.68 KiB | 121 |
+| `Process`（并行，10 核） | **4.73 µs** | 15.04 KiB | 125 |
+| `ValidateFields`（快速路径） | 146.8 ns | 0 B | 0 |
+| `Registry.Get` | 6.05 ns | 0 B | 0 |
 
 > 简单标量字段使用 Go 原生快速路径，完全绕过 CUE，
-> 相比 CUE 旧路径实现 **250 倍加速**（177ns vs 44µs）。
+> 相比 CUE 旧路径实现约 **175 倍加速**（146.8ns vs 25.62µs）。
+>
+> Pull Request 会在同一 CI runner 上分别运行 base 与 head benchmark；
+> 统计显著且超过 5% 的性能退化会使 benchmark gate 失败。
 
 ## 许可证
 
