@@ -85,10 +85,10 @@ func apiValidationExample() {
 		"role":     "user",
 	})
 	simulateRequest(createUserSchema, map[string]any{
-		"username": "ab",          // too short
+		"username": "ab", // too short
 		"email":    "not-an-email",
-		"password": "short",       // less than 8 chars
-		"role":     "superadmin",  // invalid enum
+		"password": "short",      // less than 8 chars
+		"role":     "superadmin", // invalid enum
 	})
 
 	fmt.Println("\n  --- POST /orders ---")

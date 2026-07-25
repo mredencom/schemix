@@ -33,11 +33,16 @@ const (
 	CodeCUEOther        ErrorCode = "E1X01" // other CUE error
 
 	// Layer 2: Bloblang business rules
-	CodeBizRuleFailed ErrorCode = "E2B01" // business rule returned false
-	CodeExprExecError ErrorCode = "E2X01" // expression runtime error
+	CodeBizRuleFailed    ErrorCode = "E2B01" // business rule returned false
+	CodeExprExecError    ErrorCode = "E2X01" // expression runtime error
+	CodeBlobTypeMismatch ErrorCode = "E2T01" // @blob type contract violation (WU2)
 
 	// Layer 3: Meta control
-	CodeCondRequired ErrorCode = "E3C01" // conditional required not met
+	CodeCondRequired     ErrorCode = "E3C01" // conditional required not met
+	CodeMetaRuntimeError ErrorCode = "E3X01" // meta expression runtime error (required_if/skip_if Query failure)
+
+	// Layer 0: Configuration / invocation errors
+	CodeConfigError ErrorCode = "E0C01" // invalid configuration (e.g. undefined FailMode)
 )
 
 // ValidationError represents a single validation failure.

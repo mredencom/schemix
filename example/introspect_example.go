@@ -72,7 +72,7 @@ func resultChainExample() {
 	// Input with multiple errors
 	r := v.Process(map[string]any{
 		"pan":      "9999ABCDEFGHIJKL", // regex fail
-		"amount":   int64(-1),           // range fail
+		"amount":   int64(-1),          // range fail
 		"currency": "JPY",              // enum fail
 	})
 

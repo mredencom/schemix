@@ -6,39 +6,55 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.24', '1.25']
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
 
       - name: Download dependencies
         run: go mod download
 
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
+
       - name: Vet
         run: go vet ./...
 
-      - name: Build (including examples)
-        run: go build ./...
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
 
-      - name: Test
-        run: go test -race -coverprofile=coverage.out $(go list ./... | grep -v /example)
+      - name: Enforce 70% coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          # example/ contains executable documentation. Run it above, but exclude
+          # its package-main statements from the library coverage threshold.
+          awk 'NR == 1 || $1 !~ /\/example\//' coverage.out > coverage-gated.out
+          coverage="$(go tool cover -func=coverage-gated.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          if [[ ! "$coverage" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Unable to parse total coverage: $coverage" >&2
+            exit 1
+          fi
+          echo "Gated coverage: ${coverage}%"
+          awk -v coverage="$coverage" 'BEGIN { exit !(coverage >= 70) }'
 
       - name: Upload coverage
-        if: matrix.go-version == '1.25'
         uses: codecov/codecov-action@v4
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   lint:
     runs-on: ubuntu-latest
@@ -48,7 +64,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
@@ -57,20 +74,63 @@ jobs:
 
   benchmark:
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26.5'
+          cache-dependency-path: |
+            base/go.sum
+            head/go.sum
 
-      - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 $(go list ./... | grep -v /example) | tee bench.txt
+      - name: Install pinned benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260709024250-82a0b07e230d
 
-      - name: Benchmark summary
+      - name: Benchmark base
+        working-directory: base
+        shell: bash
         run: |
-          echo '## Benchmark Results' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat bench.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          packages="$(go list ./... | grep -v '/example$')"
+          go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_base.txt
+
+      - name: Benchmark head
+        working-directory: head
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages="$(go list ./... | grep -v '/example$')"
+          go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_head.txt
+
+      - name: Compare benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          benchstat -format=csv base=bench_base.txt head=bench_head.txt > benchstat.csv
+          benchstat base=bench_base.txt head=bench_head.txt | tee benchstat_human.txt
+          {
+            echo '## Benchmark Comparison'
+            echo '```text'
+            cat benchstat_human.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce 5% regression budget
+        working-directory: head
+        run: go run ./internal/ci/benchgate/cmd -csv ../benchstat.csv -threshold 5 -raw ../benchstat_human.txt

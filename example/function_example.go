@@ -20,13 +20,14 @@ func functionExample() {
 	}
 
 	// Register as Function form — validate_schema(data: ..., name: "xxx")
-	if err := reg.RegisterFunctions(); err != nil {
+	env := bloblang.NewEnvironment()
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		log.Fatal(err)
 	}
 
 	// Example 1: validate against this directly
 	mapping1 := `root = validate_schema(data: this, name: "tx")`
-	exec1, err := bloblang.Parse(mapping1)
+	exec1, err := env.Parse(mapping1)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -38,7 +39,7 @@ func functionExample() {
 
 	// Example 2: validate nested field — dynamic parameter this.payload
 	mapping2 := `root = process_schema(data: this.payload, name: "tx")`
-	exec2, err := bloblang.Parse(mapping2)
+	exec2, err := env.Parse(mapping2)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func functionExample() {
 
 	// Example 3: Function call with mode parameter
 	mapping3 := `root = validate_schema(data: this, name: "tx", mode: "fast")`
-	exec3, err := bloblang.Parse(mapping3)
+	exec3, err := env.Parse(mapping3)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,20 +73,21 @@ func functionExample() {
 	errs := r3.(map[string]any)["errors"].([]any)
 	fmt.Printf("  mode=fast: errors=%d (returns only the first)\n", len(errs))
 
-	// Example 4: RegisterAll — method + function both available
+	// Example 4: RegisterAllTo — method + function both available
 	reg2 := schemix.NewRegistry()
 	_ = reg2.Register("simple", `{ name: string, age: int & >=0 }`)
-	if err := reg2.RegisterAll(); err != nil {
+	env2 := bloblang.NewEnvironment()
+	if err := reg2.RegisterAllTo(env2); err != nil {
 		log.Fatal(err)
 	}
 
 	// method form
-	exec4, _ := bloblang.Parse(`root = this.validate_schema(name: "simple")`)
+	exec4, _ := env2.Parse(`root = this.validate_schema(name: "simple")`)
 	r4, _ := exec4.Query(map[string]any{"name": "test", "age": int64(18)})
 	fmt.Printf("  RegisterAll method: valid=%v\n", r4.(map[string]any)["valid"])
 
 	// function form
-	exec5, _ := bloblang.Parse(`root = validate_schema(data: this, name: "simple")`)
+	exec5, _ := env2.Parse(`root = validate_schema(data: this, name: "simple")`)
 	r5, _ := exec5.Query(map[string]any{"name": "test", "age": int64(18)})
 	fmt.Printf("  RegisterAll function: valid=%v\n", r5.(map[string]any)["valid"])
 }

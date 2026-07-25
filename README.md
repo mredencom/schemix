@@ -85,7 +85,7 @@ graph TD
 go get github.com/mredencom/schemix@latest
 ```
 
-> **Requires:** Go 1.22+
+> **Requires:** Go 1.26.5 or newer
 
 ## Quick Start
 
@@ -448,13 +448,18 @@ for _, f := range fields {
 |------|----------|----------|
 | `FailAll` | Form validation | Collect all errors |
 | `FailFast` | API gateway | Stop at first error |
-| `FailPriority` | Layered validation | Priority-group isolation |
+| `FailPriority` | Layered validation | Collect CUE + Blob errors in the first failing priority group; skip higher groups |
 
 ```go
 r := v.ProcessWithMode(data, schemix.FailFast)     // 1 error max
 r := v.ProcessWithMode(data, schemix.FailAll)      // all errors
-r := v.ProcessWithMode(data, schemix.FailPriority) // p1 fails → skip p2+
+r := v.ProcessWithMode(data, schemix.FailPriority) // first failing group only
 ```
+
+> **Processing contracts:** CUE and Blob rules in the same `FailPriority` group are both evaluated.
+> Once that group fails, higher-priority-number groups do not run. Any invalid result has
+> `Output == nil`. A non-bool `@blob()` result must satisfy its field schema or validation
+> fails with `E2T01`.
 
 ## Error Codes
 
@@ -462,6 +467,7 @@ Format: `E{layer}{category}{seq}`
 
 | Constant | Code | Layer | Meaning |
 |----------|------|-------|---------|
+| `CodeConfigError` | E0C01 | Config | Invalid configuration (e.g. undefined FailMode) |
 | `CodeFormatMismatch` | E1F01 | CUE | Regex format mismatch |
 | `CodeTypeMismatch` | E1T01 | CUE | Type error |
 | `CodeEnumInvalid` | E1E01 | CUE | Invalid enum value |
@@ -471,14 +477,17 @@ Format: `E{layer}{category}{seq}`
 | `CodeCUEOther` | E1X01 | CUE | Other CUE error |
 | `CodeBizRuleFailed` | E2B01 | Blob | Business rule false |
 | `CodeExprExecError` | E2X01 | Blob | Expression error |
+| `CodeBlobTypeMismatch` | E2T01 | Blob | @blob type contract violation |
 | `CodeCondRequired` | E3C01 | Meta | Conditional required |
+| `CodeMetaRuntimeError` | E3X01 | Meta | Meta expression runtime error |
 
 ## Bloblang Integration
 
 ```go
 reg := schemix.NewRegistry()
 reg.Register("payment", cueSrc)
-reg.RegisterAll() // method + function forms
+env := bloblang.NewEnvironment()
+reg.RegisterAllTo(env) // scoped method + function forms
 ```
 
 **Method form** — validates `this`:
@@ -510,7 +519,13 @@ reg.List()                         // ["user"]
 reg.Len()                          // 1
 reg.Unregister("user")             // remove
 
-// Bloblang plugin registration
+// Scoped Bloblang registration (recommended)
+env := bloblang.NewEnvironment()
+reg.RegisterAllTo(env)             // register both method + function forms into env
+reg.RegisterMethodsTo(env)         // method form only into env
+reg.RegisterFunctionsTo(env)       // function form only into env
+
+// Deprecated global registration (uses GlobalEnvironment; repeated registration returns an error)
 reg.RegisterAll()                  // register both method + function forms
 reg.RegisterMethods()              // method form only: this.validate_schema(...) / this.process_schema(...)
 reg.RegisterFunctions()            // function form only: validate_schema(data: ...) / process_schema(data: ...)
@@ -558,21 +573,24 @@ fields := v.Fields()                             // []FieldInfo
 
 ## Benchmarks
 
-Apple M4, Go 1.26 — 6 fields (3 CUE + 3 @blob):
+Apple M4, Go 1.26.5 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 730 µs | 809 KB | 22260 |
-| `Process` (valid) | **4.9 µs** | 4.0 KB | 61 |
-| `Process` (invalid) | 5.2 µs | 4.7 KB | 75 |
-| `Process` (nested) | 45 µs | 40 KB | 456 |
-| `Validate` (no output) | **4.1 µs** | 3.6 KB | 57 |
-| `Process` (parallel, 10 cores) | **2.2 µs** | 4.0 KB | 61 |
-| `ValidateFields` (fast path) | 177 ns | 0 B | 0 |
-| `Registry.Get` | 8.3 ns | 0 B | 0 |
+| `New` (compile) | 441 µs | 791 KiB | 22275 |
+| `Process` (valid) | **7.07 µs** | 15.04 KiB | 125 |
+| `Process` (invalid) | 7.67 µs | 15.91 KiB | 141 |
+| `Process` (nested) | 30.24 µs | 45.43 KiB | 491 |
+| `Validate` (no output) | **6.48 µs** | 14.68 KiB | 121 |
+| `Process` (parallel, 10 cores) | **4.73 µs** | 15.04 KiB | 125 |
+| `ValidateFields` (fast path) | 146.8 ns | 0 B | 0 |
+| `Registry.Get` | 6.05 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving **250x speedup** over the CUE legacy path (177ns vs 44µs).
+> achieving about **175x speedup** over the CUE legacy path (146.8ns vs 25.62µs).
+>
+> Pull requests also run base and head benchmarks on the same CI runner. A statistically
+> significant regression above 5% fails the benchmark gate.
 
 ## License
 

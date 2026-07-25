@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 
@@ -18,9 +19,11 @@ type cueField struct {
 	path     string          // full dot-separated path
 	schema   cue.Value       // pre-resolved schema value
 	optional bool            // whether the field is optional
-	hasBlob  bool            // has @blob attribute — skip CUE validation (optimization #1)
+	nullable bool            // schema allows null (e.g. `null | string`)
+	hasBlob  bool            // has @blob attribute; absent input may be computed
 	isStruct bool            // IncompleteKind == StructKind
 	isList   bool            // IncompleteKind == ListKind
+	priority int             // @meta(priority=N), default 0
 	fast     *fastConstraint // Go-native fast check (nil = use CUE path)
 	children []cueField      // nested struct fields (pre-compiled recursively)
 }
@@ -358,9 +361,11 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			path:     fullPath,
 			schema:   fieldSchema,
 			optional: isOptional,
+			nullable: fieldSchema.IncompleteKind()&cue.NullKind != 0,
 			hasBlob:  blobAttr.Err() == nil,
 			isStruct: fieldSchema.IncompleteKind() == cue.StructKind,
 			isList:   fieldSchema.IncompleteKind() == cue.ListKind,
+			priority: extractFieldPriority(fieldSchema),
 		}
 
 		// Recursively compile nested struct fields
@@ -400,7 +405,10 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 			fullPath = prefix + "." + fieldName
 		}
 
-		meta := parsefieldMeta(fieldValue, v.parseBloblang)
+		meta, err := parsefieldMeta(fieldValue, v.parseBloblang)
+		if err != nil {
+			return fmt.Errorf("field %q @meta: %w", fullPath, err)
+		}
 		if isOptional {
 			meta.Optional = true
 		}
@@ -462,16 +470,37 @@ func (v *Validator) Process(data map[string]any) Result {
 
 // ProcessWithMode performs validation and value computation with the specified FailMode.
 func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
+	if err := validateFailMode(mode); err != nil {
+		return Result{
+			Valid:  false,
+			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
+		}
+	}
 	return v.processInternal(data, mode, true)
+}
+
+// validateFailMode returns an error if mode is not a recognized FailMode value.
+func validateFailMode(mode FailMode) error {
+	switch mode {
+	case FailAll, FailFast, FailPriority:
+		return nil
+	default:
+		return fmt.Errorf("invalid FailMode(%d): must be FailAll, FailFast, or FailPriority", int(mode))
+	}
 }
 
 // processInternal is the unified validation/processing engine.
 // When needOutput is false, it skips deepCopy and all Output mutations for performance.
-func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) Result {
-	result := Result{
+func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) (result Result) {
+	result = Result{
 		Valid:  true,
 		Errors: []ValidationError{},
 	}
+	defer func() {
+		if !result.Valid {
+			result.Output = nil
+		}
+	}()
 
 	if needOutput {
 		result.Output = deepCopy(data)
@@ -488,9 +517,29 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 		return result
 	}
 
+	// FailPriority: determine minFailedPriority from CUE errors and filter
+	minFailedPriority := math.MaxInt // math.MaxInt
 	if mode == FailPriority && !result.Valid {
-		return result
+		// Find the minimum priority among failed CUE fields
+		for _, e := range result.Errors {
+			p := v.fieldPriorityByPath(e.Path)
+			if p < minFailedPriority {
+				minFailedPriority = p
+			}
+		}
+		// Filter: keep only errors from the minimum failed priority group
+		filtered := result.Errors[:0]
+		for _, e := range result.Errors {
+			if v.fieldPriorityByPath(e.Path) == minFailedPriority {
+				filtered = append(filtered, e)
+			}
+		}
+		result.Errors = filtered
 	}
+
+	// Preserve the CUE-layer failures before Blob errors are appended. A rule on
+	// the same field must never execute after its CUE constraint has failed.
+	cueErrors := append([]ValidationError(nil), result.Errors...)
 
 	// Layer 2: @blob + @meta rules
 	failedPaths := map[string]bool{}
@@ -499,6 +548,11 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 
 	for _, rule := range v.blobRules {
 		meta := rule.Meta
+
+		if hasValidationErrorAtPath(cueErrors, rule.Path) {
+			failedPaths[rule.Path] = true
+			continue
+		}
 
 		// FailPriority: check priority group transition
 		if mode == FailPriority && meta.Priority > currentPriority {
@@ -509,6 +563,12 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 			priorityHasError = false
 		}
 
+		// blobRules are sorted by priority, so once this boundary is crossed
+		// every remaining rule belongs to a later group.
+		if mode == FailPriority && minFailedPriority < math.MaxInt && meta.Priority > minFailedPriority {
+			break
+		}
+
 		// Field-level fail_fast
 		if meta.FailFast && failedPaths[rule.Path] {
 			continue
@@ -516,13 +576,28 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 
 		// skip_if
 		if meta.SkipIf != nil {
-			if res, err := meta.SkipIf.Query(data); err == nil {
-				if skip, ok := res.(bool); ok && skip {
-					if meta.OmitIfSkip && result.Output != nil {
-						deleteNestedKey(result.Output, rule.Path)
-					}
-					continue
+			res, err := meta.SkipIf.Query(data)
+			if err != nil {
+				detail := fmt.Sprintf("skip_if expression error (%s): %v", meta.SkipIfExpr, err)
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    CodeMetaRuntimeError,
+					Path:    rule.Path,
+					Type:    TypeMeta,
+					Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+				})
+				failedPaths[rule.Path] = true
+				priorityHasError = true
+				if mode == FailFast {
+					return result
 				}
+				continue
+			}
+			if skip, ok := res.(bool); ok && skip {
+				if meta.OmitIfSkip && result.Output != nil {
+					deleteNestedKey(result.Output, rule.Path)
+				}
+				continue
 			}
 		}
 
@@ -549,21 +624,34 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 				deleteNestedKey(result.Output, rule.Path)
 			}
 			if meta.RequiredIf != nil {
-				if res, err := meta.RequiredIf.Query(data); err == nil {
-					if required, ok := res.(bool); ok && required {
-						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
-						result.Valid = false
-						result.Errors = append(result.Errors, ValidationError{
-							Code:    CodeCondRequired,
-							Path:    rule.Path,
-							Type:    TypeMeta,
-							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
-						})
-						failedPaths[rule.Path] = true
-						priorityHasError = true
-						if mode == FailFast {
-							return result
-						}
+				res, err := meta.RequiredIf.Query(data)
+				if err != nil {
+					detail := fmt.Sprintf("required_if expression error (%s): %v", meta.RequiredIfExpr, err)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeMetaRuntimeError,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+				} else if required, ok := res.(bool); ok && required {
+					detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeCondRequired,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
 					}
 				}
 			}
@@ -573,21 +661,34 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 		// conditional + required_if
 		if meta.Conditional && fieldVal == nil {
 			if meta.RequiredIf != nil {
-				if res, err := meta.RequiredIf.Query(data); err == nil {
-					if required, ok := res.(bool); ok && required {
-						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
-						result.Valid = false
-						result.Errors = append(result.Errors, ValidationError{
-							Code:    CodeCondRequired,
-							Path:    rule.Path,
-							Type:    TypeMeta,
-							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
-						})
-						failedPaths[rule.Path] = true
-						priorityHasError = true
-						if mode == FailFast {
-							return result
-						}
+				res, err := meta.RequiredIf.Query(data)
+				if err != nil {
+					detail := fmt.Sprintf("required_if expression error (%s): %v", meta.RequiredIfExpr, err)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeMetaRuntimeError,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+				} else if required, ok := res.(bool); ok && required {
+					detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeCondRequired,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
 					}
 				}
 			}
@@ -631,7 +732,16 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 					}
 				}
 			} else {
-				// Value mode: write computed result to output only when needed
+				// Value mode: write computed result to output only when needed.
+				// Strict type contract: verify the computed value matches the CUE field type.
+				if !v.checkBlobResultType(rule.Path, res, &result, mode) {
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+					continue
+				}
 				if result.Output != nil {
 					setNestedValue(result.Output, rule.Path, res)
 				}
@@ -642,21 +752,87 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	return result
 }
 
+func hasValidationErrorAtPath(errors []ValidationError, path string) bool {
+	for _, validationErr := range errors {
+		if validationErr.Path == path || strings.HasPrefix(validationErr.Path, path+".") ||
+			strings.HasPrefix(validationErr.Path, path+"[") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkBlobResultType verifies that a non-bool @blob result matches the
+// declared CUE field type. Returns true if type-compatible, false if a
+// E2T01 error was emitted (strict type contract).
+func (v *Validator) checkBlobResultType(path string, val any, result *Result, mode FailMode) bool {
+	// Look up the field's CUE schema
+	field := v.findCUEField(v.cueFields, path)
+	if field == nil {
+		// No CUE field found — cannot type-check (should not happen for well-formed schemas)
+		return true
+	}
+
+	// Encode the computed value and unify with the field schema
+	encoded := v.ctx.Encode(val)
+	unified := field.schema.Unify(encoded)
+	if err := unified.Validate(cue.Concrete(true)); err != nil {
+		detail := fmt.Sprintf("@blob result type mismatch: computed %T, field expects %s",
+			val, cueKindToString(field.schema.IncompleteKind()))
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Code:    CodeBlobTypeMismatch,
+			Path:    path,
+			Type:    TypeBloblang,
+			Message: v.formatMessage(CodeBlobTypeMismatch, path, detail),
+		})
+		return false
+	}
+	return true
+}
+
+// findCUEField searches the pre-compiled field tree for a field at the given dot-path.
+func (v *Validator) findCUEField(fields []cueField, path string) *cueField {
+	parts := strings.Split(path, ".")
+	current := fields
+	for i, part := range parts {
+		found := false
+		for j := range current {
+			if current[j].name == part {
+				if i == len(parts)-1 {
+					return &current[j]
+				}
+				current = current[j].children
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+	return nil
+}
+
+// fieldPriorityByPath looks up the priority of a field by its dot-path from cueFields.
+func (v *Validator) fieldPriorityByPath(path string) int {
+	f := v.findCUEField(v.cueFields, path)
+	if f != nil {
+		return f.priority
+	}
+	return 0
+}
+
 // validateCUEFields validates data against pre-compiled field descriptors.
 // This is significantly faster than the old validateCUERecursive because:
-//   - Optimization #1: @blob fields are skipped BEFORE Unify (zero cost)
-//   - Optimization #2: Go map check before CUE LookupPath (fast path for missing fields)
-//   - Optimization #3: Field metadata is pre-compiled, no schema.Fields() iteration at runtime
+//   - Optimization #1: Go map check before CUE LookupPath (fast path for missing fields)
+//   - Optimization #2: Field metadata is pre-compiled, no schema.Fields() iteration at runtime
+//   - Correctness: present @blob fields still satisfy their CUE constraints before Blob execution
 func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData map[string]any, result *Result) {
 	for i := range fields {
 		f := &fields[i]
 
-		// Optimization #1: skip @blob fields entirely — they are validated by Bloblang layer
-		if f.hasBlob {
-			continue
-		}
-
-		// Optimization #2: fast Go-level existence check before touching CUE
+		// Fast Go-level existence check before touching CUE.
 		// Use field name (not full path) since rawData is the current level map
 		goVal, exists := rawData[f.name]
 		if !exists {
@@ -674,24 +850,38 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 		if goVal == nil {
-			// Field exists but value is nil — let CUE validate nullability
-			// (e.g. `null | string` schemas allow nil)
+			// Field exists but value is nil — check if schema allows null
+			if f.nullable {
+				continue
+			}
+			// Non-nullable field with nil value → required missing
+			detail := fmt.Sprintf("field %q is nil but not nullable", f.path)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeRequiredMissing,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeRequiredMissing, f.path, detail),
+			})
 			continue
 		}
 
 		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
 		if f.fast != nil {
-			valid, code, detail := validateFast(f.fast, goVal)
-			if !valid {
-				result.Valid = false
-				result.Errors = append(result.Errors, ValidationError{
-					Code:    code,
-					Path:    f.path,
-					Type:    TypeCUE,
-					Message: v.formatMessage(code, f.path, detail),
-				})
+			handled, valid, code, detail := validateFast(f.fast, goVal)
+			if handled {
+				if !valid {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    code,
+						Path:    f.path,
+						Type:    TypeCUE,
+						Message: v.formatMessage(code, f.path, detail),
+					})
+				}
+				continue
 			}
-			continue
+			// handled=false: fall through to CUE Unify
 		}
 
 		// Only now do we touch CUE for actual constraint validation
@@ -709,6 +899,19 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 
+		// Struct field with wrong type (e.g. int instead of struct)
+		if f.isStruct {
+			detail := fmt.Sprintf("field %q expects struct, got %T", f.path, goVal)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeTypeMismatch,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+			})
+			continue
+		}
+
 		// List validation
 		if f.isList && fieldData.IncompleteKind() == cue.ListKind {
 			listUnified := f.schema.Unify(fieldData)
@@ -719,7 +922,7 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
-					ePath := f.path + "." + extractIndex(e.Error())
+					ePath := formatCUEErrorPath(f.path, e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,
@@ -732,21 +935,32 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 
+		// List field with wrong type (e.g. string instead of list)
+		if f.isList {
+			detail := fmt.Sprintf("field %q expects list, got %T", f.path, goVal)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeTypeMismatch,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+			})
+			continue
+		}
+
 		// Scalar/enum validation: Unify + Validate
 		unified := f.schema.Unify(fieldData)
 		if err := unified.Validate(cue.Concrete(true)); err != nil {
-			if !f.optional {
-				cueErrs := cueerrors.Errors(err)
-				for _, e := range cueErrs {
-					code := classifyCUEErrorStructured(e)
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:    code,
-						Path:    f.path,
-						Type:    TypeCUE,
-						Message: v.formatMessage(code, f.path, e.Error()),
-					})
-				}
+			cueErrs := cueerrors.Errors(err)
+			for _, e := range cueErrs {
+				code := classifyCUEErrorStructured(e)
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    code,
+					Path:    f.path,
+					Type:    TypeCUE,
+					Message: v.formatMessage(code, f.path, e.Error()),
+				})
 			}
 		}
 	}
@@ -819,7 +1033,7 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
-					ePath := fullPath + "." + extractIndex(e.Error())
+					ePath := formatCUEErrorPath(fullPath, e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,

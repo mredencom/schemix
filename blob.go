@@ -16,6 +16,11 @@ type Registry struct {
 	cueCtx     *cue.Context // shared CUE context for all validators in this registry
 }
 
+// globalBloblangEnvironment is a stable wrapper around Bento's process-global
+// Bloblang environment. Bento returns a new wrapper from GlobalEnvironment on
+// each call, so schemix must retain one pointer for ownership enforcement.
+var globalBloblangEnvironment = bloblang.GlobalEnvironment()
+
 // NewRegistry creates an empty validator registry with a shared CUE context.
 func NewRegistry() *Registry {
 	return &Registry{
@@ -84,15 +89,17 @@ func (r *Registry) Len() int {
 	return n
 }
 
-// parseFailMode converts a mode string to FailMode. Defaults to FailAll.
-func parseFailMode(mode string) FailMode {
+// parseFailMode converts a mode string to FailMode. Returns error for unrecognized values.
+func parseFailMode(mode string) (FailMode, error) {
 	switch mode {
+	case ModeAll:
+		return FailAll, nil
 	case ModeFast:
-		return FailFast
+		return FailFast, nil
 	case ModePriority:
-		return FailPriority
+		return FailPriority, nil
 	default:
-		return FailAll
+		return 0, fmt.Errorf("invalid mode %q: must be %q, %q, or %q", mode, ModeAll, ModeFast, ModePriority)
 	}
 }
 
@@ -111,20 +118,49 @@ func resultToMap(valid bool, errs []ValidationError, output map[string]any) map[
 	return m
 }
 
+// RegisterMethodsTo registers "validate_schema" and "process_schema" as
+// Bloblang methods into a specific environment. Ownership is enforced:
+// the same env cannot be registered by a different Registry.
+func (r *Registry) RegisterMethodsTo(env *bloblang.Environment) error {
+	if err := claimComponent(env, r, true, false); err != nil {
+		return err
+	}
+	return r.registerMethodsTo(env)
+}
+
+// RegisterFunctionsTo registers "validate_schema" and "process_schema" as
+// Bloblang functions into a specific environment. Ownership is enforced.
+func (r *Registry) RegisterFunctionsTo(env *bloblang.Environment) error {
+	if err := claimComponent(env, r, false, true); err != nil {
+		return err
+	}
+	return r.registerFunctionsTo(env)
+}
+
+// RegisterAllTo registers both method and function forms into a specific
+// environment. Ownership is enforced.
+func (r *Registry) RegisterAllTo(env *bloblang.Environment) error {
+	if err := claimComponent(env, r, true, true); err != nil {
+		return err
+	}
+	if err := r.registerMethodsTo(env); err != nil {
+		return err
+	}
+	return r.registerFunctionsTo(env)
+}
+
 // RegisterMethods registers "validate_schema" and "process_schema"
-// Bloblang methods that use validators from this registry.
+// Bloblang methods into the global environment.
 //
-// Usage in Bloblang mappings:
-//
-//	let r = this.validate_schema(name: "payment")
-//	let r = this.validate_schema(name: "payment", mode: "fast")
-//	let r = this.process_schema(name: "payment")
-//	let r = this.process_schema(name: "payment", mode: "priority")
-//
-// Supported mode values: "all" (default), "fast", "priority".
+// Deprecated: Use RegisterMethodsTo with an explicit environment.
 func (r *Registry) RegisterMethods() error {
+	return r.RegisterMethodsTo(globalBloblangEnvironment)
+}
+
+// registerMethodsTo performs the actual method registration into a given env.
+func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 	// validate_schema method
-	if err := bloblang.RegisterMethodV2(pluginValidateSchema,
+	if err := env.RegisterMethodV2(pluginValidateSchema,
 		bloblang.NewPluginSpec().
 			Category(categoryValidation).
 			Description("Validate data using a registered CUE+Bloblang schema").
@@ -143,7 +179,10 @@ func (r *Registry) RegisterMethods() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
 				result := v.ProcessWithMode(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
@@ -154,7 +193,7 @@ func (r *Registry) RegisterMethods() error {
 	}
 
 	// process_schema method
-	if err := bloblang.RegisterMethodV2(pluginProcessSchema,
+	if err := env.RegisterMethodV2(pluginProcessSchema,
 		bloblang.NewPluginSpec().
 			Category(categoryValidation).
 			Description("Validate and compute values using a registered CUE+Bloblang schema").
@@ -173,7 +212,10 @@ func (r *Registry) RegisterMethods() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
 				result := v.ProcessWithMode(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
@@ -187,20 +229,17 @@ func (r *Registry) RegisterMethods() error {
 }
 
 // RegisterFunctions registers "validate_schema" and "process_schema"
-// as Bloblang functions (not methods). This allows calling them without a
-// target value:
+// as Bloblang functions into the global environment.
 //
-//	let r = validate_schema(data: this, name: "payment")
-//	let r = validate_schema(data: this, name: "payment", mode: "fast")
-//	let r = process_schema(data: this, name: "payment")
-//	let r = process_schema(data: this, name: "payment", mode: "priority")
-//
-// The data parameter is dynamically evaluated on each invocation, so expressions
-// like "this.payload" work correctly.
-// Supported mode values: "all" (default), "fast", "priority".
+// Deprecated: Use RegisterFunctionsTo with an explicit environment.
 func (r *Registry) RegisterFunctions() error {
+	return r.RegisterFunctionsTo(globalBloblangEnvironment)
+}
+
+// registerFunctionsTo performs the actual function registration into a given env.
+func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 	// validate_schema function (advanced — supports dynamic data param)
-	if err := bloblang.RegisterAdvancedFunction(pluginValidateSchema,
+	if err := env.RegisterAdvancedFunction(pluginValidateSchema,
 		bloblang.NewPluginSpec().
 			Category(categoryValidation).
 			Description("Validate data using a registered CUE+Bloblang schema (function form)").
@@ -224,7 +263,10 @@ func (r *Registry) RegisterFunctions() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return func(ctx *bloblang.ExecContext) (any, error) {
 				dataRaw, err := ctx.Exec(dataFn)
 				if err != nil {
@@ -243,7 +285,7 @@ func (r *Registry) RegisterFunctions() error {
 	}
 
 	// process_schema function (advanced — supports dynamic data param)
-	if err := bloblang.RegisterAdvancedFunction(pluginProcessSchema,
+	if err := env.RegisterAdvancedFunction(pluginProcessSchema,
 		bloblang.NewPluginSpec().
 			Category(categoryValidation).
 			Description("Validate and compute values using a registered CUE+Bloblang schema (function form)").
@@ -267,7 +309,10 @@ func (r *Registry) RegisterFunctions() error {
 			if !ok {
 				return nil, fmt.Errorf("validator %q not registered", name)
 			}
-			mode := parseFailMode(modeStr)
+			mode, err := parseFailMode(modeStr)
+			if err != nil {
+				return nil, err
+			}
 			return func(ctx *bloblang.ExecContext) (any, error) {
 				dataRaw, err := ctx.Exec(dataFn)
 				if err != nil {
@@ -289,11 +334,9 @@ func (r *Registry) RegisterFunctions() error {
 }
 
 // RegisterAll registers both method and function forms of validate_schema and
-// process_schema. This is a convenience method combining RegisterMethods
-// and RegisterFunctions.
+// process_schema into the global environment.
+//
+// Deprecated: Use RegisterAllTo with an explicit environment.
 func (r *Registry) RegisterAll() error {
-	if err := r.RegisterMethods(); err != nil {
-		return err
-	}
-	return r.RegisterFunctions()
+	return r.RegisterAllTo(globalBloblangEnvironment)
 }

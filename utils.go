@@ -1,8 +1,13 @@
 package schemix
 
 import (
+	"cmp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"cuelang.org/go/cue"
+	cueerrors "cuelang.org/go/cue/errors"
 )
 
 // getNestedValue retrieves a value from a nested map by dot-separated path.
@@ -114,20 +119,58 @@ func isEmpty(v any) bool {
 	}
 }
 
-// sortBlobRules sorts rules by priority (stable) using the standard library.
+// sortBlobRules sorts rules by priority (stable), overflow-safe via cmp.Compare.
 func sortBlobRules(rules []blobRule) {
 	slices.SortStableFunc(rules, func(a, b blobRule) int {
-		return a.Meta.Priority - b.Meta.Priority
+		return cmp.Compare(a.Meta.Priority, b.Meta.Priority)
 	})
 }
 
-// extractIndex attempts to extract an array index path from a CUE error message.
-func extractIndex(errMsg string) string {
-	if idx := strings.Index(errMsg, ":"); idx > 0 {
-		path := strings.TrimSpace(errMsg[:idx])
-		if len(path) > 0 && path[0] >= '0' && path[0] <= '9' {
-			return path
+// formatCUEErrorPath formats a structured CUE error path using Go-style array indices.
+func formatCUEErrorPath(parent string, err error) string {
+	segments := cueerrors.Path(err)
+	if len(segments) == 0 {
+		return parent
+	}
+
+	var path strings.Builder
+	for _, segment := range segments {
+		if _, parseErr := strconv.ParseUint(segment, 10, 64); parseErr == nil {
+			path.WriteByte('[')
+			path.WriteString(segment)
+			path.WriteByte(']')
+			continue
+		}
+		if path.Len() > 0 {
+			path.WriteByte('.')
+		}
+		path.WriteString(segment)
+	}
+
+	formatted := path.String()
+	if parent == "" || formatted == parent || strings.HasPrefix(formatted, parent+".") ||
+		strings.HasPrefix(formatted, parent+"[") {
+		return formatted
+	}
+	return parent + "." + formatted
+}
+
+// extractFieldPriority reads the @meta(priority=N) value from a CUE field value.
+// Returns 0 (default priority) if no priority is specified or if parsing fails.
+func extractFieldPriority(fieldSchema cue.Value) int {
+	metaAttr := fieldSchema.Attribute(attrMeta)
+	if metaAttr.Err() != nil {
+		return 0
+	}
+	for i := range metaAttr.NumArgs() {
+		key, val := metaAttr.Arg(i)
+		key = strings.TrimSpace(key)
+		if key == metaPriority && val != "" {
+			p, err := strconv.Atoi(val)
+			if err == nil {
+				return p
+			}
 		}
 	}
-	return ""
+	return 0
 }
