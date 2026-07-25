@@ -136,10 +136,13 @@ func TestClassifyCUEError_GoldenMatrix(t *testing.T) {
 				t.Fatalf("expected invalid result for test %q", tt.name)
 			}
 
-			// Find the expected error (path can be exact or prefix match for array elements)
+			// Find the expected error. Nested object paths use '.', while array
+			// element paths use '[N]' after the parent field.
 			found := false
 			for _, e := range r.Errors {
-				pathMatch := e.Path == tt.expectedPath || strings.HasPrefix(e.Path, tt.expectedPath+".")
+				pathMatch := e.Path == tt.expectedPath ||
+					strings.HasPrefix(e.Path, tt.expectedPath+".") ||
+					strings.HasPrefix(e.Path, tt.expectedPath+"[")
 				if pathMatch && e.Code == tt.expectedCode {
 					found = true
 					break

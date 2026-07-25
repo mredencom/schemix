@@ -553,6 +553,7 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 			failedPaths[rule.Path] = true
 			continue
 		}
+
 		// FailPriority: check priority group transition
 		if mode == FailPriority && meta.Priority > currentPriority {
 			if priorityHasError {
@@ -921,7 +922,7 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
-					ePath := f.path + "." + extractIndex(e.Error())
+					ePath := formatCUEErrorPath(f.path, e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,
@@ -1032,7 +1033,7 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
-					ePath := fullPath + "." + extractIndex(e.Error())
+					ePath := formatCUEErrorPath(fullPath, e)
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Code:    code,

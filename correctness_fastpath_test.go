@@ -166,6 +166,8 @@ func TestCmpCompareSortOverflowSafe(t *testing.T) {
 	}
 }
 
+// TestIntegrationFloatOnInt verifies that passing a float value to an int-typed
+// CUE field produces E1T01 at the public API level via the fast path.
 func TestIntegrationFloatOnInt(t *testing.T) {
 	v := MustNew(`{ age: int & >=0 & <=150 }`)
 
@@ -203,7 +205,9 @@ func TestIntegrationFloatOnInt(t *testing.T) {
 			if !tt.wantValid && !r.HasCode(tt.wantCode) {
 				t.Errorf("expected code %v, got: %v", tt.wantCode, r.Errors)
 			}
-
+			if !tt.wantValid && r.Output != nil {
+				t.Errorf("expected nil Output on invalid result, got: %v", r.Output)
+			}
 		})
 	}
 }
@@ -333,6 +337,47 @@ func TestFloatEnumFastpath(t *testing.T) {
 }
 
 // TestArrayPathFormatting verifies exact indexed paths for nested array element errors.
+func TestArrayPathFormatting(t *testing.T) {
+	tests := []struct {
+		name     string
+		items    []any
+		wantPath string
+	}{
+		{
+			name: "first_element",
+			items: []any{
+				map[string]any{"name": "Alice", "age": "not-int"},
+			},
+			wantPath: "items[0].age",
+		},
+		{
+			name: "second_element",
+			items: []any{
+				map[string]any{"name": "Alice", "age": int64(30)},
+				map[string]any{"name": "Bob", "age": "not-int"},
+			},
+			wantPath: "items[1].age",
+		},
+	}
+
+	v := MustNew(`{ items: [...{ name: string, age: int }] }`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := v.Process(map[string]any{"items": tt.items})
+			if r.Valid {
+				t.Fatal("expected Valid=false for array element type mismatch")
+			}
+
+			for _, validationErr := range r.Errors {
+				if validationErr.Code == CodeTypeMismatch && validationErr.Path == tt.wantPath {
+					return
+				}
+			}
+			t.Fatalf("expected E1T01 at %q, got %v", tt.wantPath, r.Errors)
+		})
+	}
+}
+
 func TestUnsignedIntegerFallsBackToCUE(t *testing.T) {
 	v := MustNew(`{ n: int & >0 }`)
 	tests := []struct {

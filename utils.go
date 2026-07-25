@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue"
+	cueerrors "cuelang.org/go/cue/errors"
 )
 
 // getNestedValue retrieves a value from a nested map by dot-separated path.
@@ -125,15 +126,33 @@ func sortBlobRules(rules []blobRule) {
 	})
 }
 
-// extractIndex attempts to extract an array index path from a CUE error message.
-func extractIndex(errMsg string) string {
-	if idx := strings.Index(errMsg, ":"); idx > 0 {
-		path := strings.TrimSpace(errMsg[:idx])
-		if len(path) > 0 && path[0] >= '0' && path[0] <= '9' {
-			return path
-		}
+// formatCUEErrorPath formats a structured CUE error path using Go-style array indices.
+func formatCUEErrorPath(parent string, err error) string {
+	segments := cueerrors.Path(err)
+	if len(segments) == 0 {
+		return parent
 	}
-	return ""
+
+	var path strings.Builder
+	for _, segment := range segments {
+		if _, parseErr := strconv.ParseUint(segment, 10, 64); parseErr == nil {
+			path.WriteByte('[')
+			path.WriteString(segment)
+			path.WriteByte(']')
+			continue
+		}
+		if path.Len() > 0 {
+			path.WriteByte('.')
+		}
+		path.WriteString(segment)
+	}
+
+	formatted := path.String()
+	if parent == "" || formatted == parent || strings.HasPrefix(formatted, parent+".") ||
+		strings.HasPrefix(formatted, parent+"[") {
+		return formatted
+	}
+	return parent + "." + formatted
 }
 
 // extractFieldPriority reads the @meta(priority=N) value from a CUE field value.
