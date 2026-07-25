@@ -402,7 +402,10 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 			fullPath = prefix + "." + fieldName
 		}
 
-		meta := parsefieldMeta(fieldValue, v.parseBloblang)
+		meta, err := parsefieldMeta(fieldValue, v.parseBloblang)
+		if err != nil {
+			return fmt.Errorf("field %q @meta: %w", fullPath, err)
+		}
 		if isOptional {
 			meta.Optional = true
 		}
@@ -518,13 +521,28 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 
 		// skip_if
 		if meta.SkipIf != nil {
-			if res, err := meta.SkipIf.Query(data); err == nil {
-				if skip, ok := res.(bool); ok && skip {
-					if meta.OmitIfSkip && result.Output != nil {
-						deleteNestedKey(result.Output, rule.Path)
-					}
-					continue
+			res, err := meta.SkipIf.Query(data)
+			if err != nil {
+				detail := fmt.Sprintf("skip_if expression error (%s): %v", meta.SkipIfExpr, err)
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    CodeMetaRuntimeError,
+					Path:    rule.Path,
+					Type:    TypeMeta,
+					Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+				})
+				failedPaths[rule.Path] = true
+				priorityHasError = true
+				if mode == FailFast {
+					return result
 				}
+				continue
+			}
+			if skip, ok := res.(bool); ok && skip {
+				if meta.OmitIfSkip && result.Output != nil {
+					deleteNestedKey(result.Output, rule.Path)
+				}
+				continue
 			}
 		}
 
@@ -551,21 +569,34 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 				deleteNestedKey(result.Output, rule.Path)
 			}
 			if meta.RequiredIf != nil {
-				if res, err := meta.RequiredIf.Query(data); err == nil {
-					if required, ok := res.(bool); ok && required {
-						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
-						result.Valid = false
-						result.Errors = append(result.Errors, ValidationError{
-							Code:    CodeCondRequired,
-							Path:    rule.Path,
-							Type:    TypeMeta,
-							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
-						})
-						failedPaths[rule.Path] = true
-						priorityHasError = true
-						if mode == FailFast {
-							return result
-						}
+				res, err := meta.RequiredIf.Query(data)
+				if err != nil {
+					detail := fmt.Sprintf("required_if expression error (%s): %v", meta.RequiredIfExpr, err)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeMetaRuntimeError,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+				} else if required, ok := res.(bool); ok && required {
+					detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeCondRequired,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
 					}
 				}
 			}
@@ -575,21 +606,34 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 		// conditional + required_if
 		if meta.Conditional && fieldVal == nil {
 			if meta.RequiredIf != nil {
-				if res, err := meta.RequiredIf.Query(data); err == nil {
-					if required, ok := res.(bool); ok && required {
-						detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
-						result.Valid = false
-						result.Errors = append(result.Errors, ValidationError{
-							Code:    CodeCondRequired,
-							Path:    rule.Path,
-							Type:    TypeMeta,
-							Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
-						})
-						failedPaths[rule.Path] = true
-						priorityHasError = true
-						if mode == FailFast {
-							return result
-						}
+				res, err := meta.RequiredIf.Query(data)
+				if err != nil {
+					detail := fmt.Sprintf("required_if expression error (%s): %v", meta.RequiredIfExpr, err)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeMetaRuntimeError,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
+					}
+				} else if required, ok := res.(bool); ok && required {
+					detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Code:    CodeCondRequired,
+						Path:    rule.Path,
+						Type:    TypeMeta,
+						Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
+					})
+					failedPaths[rule.Path] = true
+					priorityHasError = true
+					if mode == FailFast {
+						return result
 					}
 				}
 			}

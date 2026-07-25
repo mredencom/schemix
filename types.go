@@ -37,7 +37,8 @@ const (
 	CodeExprExecError ErrorCode = "E2X01" // expression runtime error
 
 	// Layer 3: Meta control
-	CodeCondRequired ErrorCode = "E3C01" // conditional required not met
+	CodeCondRequired     ErrorCode = "E3C01" // conditional required not met
+	CodeMetaRuntimeError ErrorCode = "E3X01" // meta expression runtime error (required_if/skip_if Query failure)
 )
 
 // ValidationError represents a single validation failure.
