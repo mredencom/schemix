@@ -66,6 +66,8 @@ func TestValidFailModesStillWork(t *testing.T) {
 // TestInvalidFailModeBloblangMapping verifies that Bloblang plugins reject
 // invalid mode strings at mapping construction time (not at execution time).
 func TestInvalidFailModeBloblangMapping(t *testing.T) {
+	releaseEnv(globalBloblangEnvironment)
+	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test", `{ name: string }`); err != nil {
 		t.Fatal(err)
@@ -97,6 +99,8 @@ func TestInvalidFailModeBloblangMapping(t *testing.T) {
 
 // TestValidModeBloblangMapping verifies that valid mode strings construct and execute.
 func TestValidModeBloblangMapping(t *testing.T) {
+	releaseEnv(globalBloblangEnvironment)
+	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test", `{ name: string }`); err != nil {
 		t.Fatal(err)

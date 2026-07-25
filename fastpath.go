@@ -139,8 +139,14 @@ func extractFloatConstraint(schema cue.Value) *fastConstraint {
 // extractNumberConstraint handles number fields (int or float).
 func extractNumberConstraint(schema cue.Value) *fastConstraint {
 	if fc := extractNumericRange(schema, false); fc != nil {
+		fc.expectFloat = false
 		fc.expectNumber = true
 		return fc
+	}
+	if op, _ := schema.Expr(); op != cue.NoOp {
+		// A constrained number that cannot be represented exactly by the fast
+		// descriptor must remain on the CUE correctness path.
+		return nil
 	}
 	return &fastConstraint{kind: constraintType, expectNumber: true}
 }

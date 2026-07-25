@@ -26,6 +26,8 @@ func execMapping(t *testing.T, mapping string, data map[string]any) map[string]a
 
 func setupRegistry(t *testing.T) *Registry {
 	t.Helper()
+	releaseEnv(globalBloblangEnvironment)
+	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test_schema", `{
 		name: string
@@ -304,6 +306,8 @@ func TestInvalidMode(t *testing.T) {
 }
 
 func TestUnregisteredSchema(t *testing.T) {
+	releaseEnv(globalBloblangEnvironment)
+	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.RegisterMethods(); err != nil {
 		t.Fatalf("register methods: %v", err)
