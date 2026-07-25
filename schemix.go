@@ -18,6 +18,7 @@ type cueField struct {
 	path     string          // full dot-separated path
 	schema   cue.Value       // pre-resolved schema value
 	optional bool            // whether the field is optional
+	nullable bool            // schema allows null (e.g. `null | string`)
 	hasBlob  bool            // has @blob attribute — skip CUE validation (optimization #1)
 	isStruct bool            // IncompleteKind == StructKind
 	isList   bool            // IncompleteKind == ListKind
@@ -358,6 +359,7 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			path:     fullPath,
 			schema:   fieldSchema,
 			optional: isOptional,
+			nullable: fieldSchema.IncompleteKind()&cue.NullKind != 0,
 			hasBlob:  blobAttr.Err() == nil,
 			isStruct: fieldSchema.IncompleteKind() == cue.StructKind,
 			isList:   fieldSchema.IncompleteKind() == cue.ListKind,
@@ -674,8 +676,19 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 		if goVal == nil {
-			// Field exists but value is nil — let CUE validate nullability
-			// (e.g. `null | string` schemas allow nil)
+			// Field exists but value is nil — check if schema allows null
+			if f.nullable {
+				continue
+			}
+			// Non-nullable field with nil value → required missing
+			detail := fmt.Sprintf("field %q is nil but not nullable", f.path)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeRequiredMissing,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeRequiredMissing, f.path, detail),
+			})
 			continue
 		}
 
@@ -709,6 +722,19 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 
+		// Struct field with wrong type (e.g. int instead of struct)
+		if f.isStruct {
+			detail := fmt.Sprintf("field %q expects struct, got %T", f.path, goVal)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeTypeMismatch,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+			})
+			continue
+		}
+
 		// List validation
 		if f.isList && fieldData.IncompleteKind() == cue.ListKind {
 			listUnified := f.schema.Unify(fieldData)
@@ -732,21 +758,32 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			continue
 		}
 
+		// List field with wrong type (e.g. string instead of list)
+		if f.isList {
+			detail := fmt.Sprintf("field %q expects list, got %T", f.path, goVal)
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Code:    CodeTypeMismatch,
+				Path:    f.path,
+				Type:    TypeCUE,
+				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+			})
+			continue
+		}
+
 		// Scalar/enum validation: Unify + Validate
 		unified := f.schema.Unify(fieldData)
 		if err := unified.Validate(cue.Concrete(true)); err != nil {
-			if !f.optional {
-				cueErrs := cueerrors.Errors(err)
-				for _, e := range cueErrs {
-					code := classifyCUEErrorStructured(e)
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:    code,
-						Path:    f.path,
-						Type:    TypeCUE,
-						Message: v.formatMessage(code, f.path, e.Error()),
-					})
-				}
+			cueErrs := cueerrors.Errors(err)
+			for _, e := range cueErrs {
+				code := classifyCUEErrorStructured(e)
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Code:    code,
+					Path:    f.path,
+					Type:    TypeCUE,
+					Message: v.formatMessage(code, f.path, e.Error()),
+				})
 			}
 		}
 	}
