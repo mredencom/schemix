@@ -29,3 +29,7 @@ go.work.sum
 
 # Vendor (if not committed)
 # vendor/
+
+# Agent tooling
+.atl/
+.kiro/
