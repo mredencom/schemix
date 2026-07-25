@@ -28,18 +28,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *csvPath == "" {
-		fmt.Fprintln(stderr, "ERROR: -csv flag is required")
+		_, _ = fmt.Fprintln(stderr, "ERROR: -csv flag is required")
 		return 2
 	}
 
 	regressions, err := benchgate.ParseAndCheck(*csvPath, *threshold)
 	if err != nil {
-		fmt.Fprintf(stderr, "ERROR: cannot parse benchstat CSV: %v\n", err)
-		fmt.Fprintln(stderr, "Failing closed. Raw benchstat output:")
+		_, _ = fmt.Fprintf(stderr, "ERROR: cannot parse benchstat CSV: %v\n", err)
+		_, _ = fmt.Fprintln(stderr, "Failing closed. Raw benchstat output:")
 		if *rawPath != "" {
 			raw, readErr := os.ReadFile(*rawPath)
 			if readErr != nil {
-				fmt.Fprintf(stderr, "ERROR: cannot read raw benchstat output: %v\n", readErr)
+				_, _ = fmt.Fprintf(stderr, "ERROR: cannot read raw benchstat output: %v\n", readErr)
 			} else {
 				_, _ = stderr.Write(raw)
 			}
@@ -47,9 +47,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(regressions) != 0 {
-		fmt.Fprintf(stderr, "FAIL: %d benchmark metric(s) regressed >%.2f%%:\n", len(regressions), *threshold)
+		_, _ = fmt.Fprintf(stderr, "FAIL: %d benchmark metric(s) regressed >%.2f%%:\n", len(regressions), *threshold)
 		for _, regression := range regressions {
-			fmt.Fprintf(stderr, "  %s %s: %+.2f%% (p=%.3f)\n",
+			_, _ = fmt.Fprintf(stderr, "  %s %s: %+.2f%% (p=%.3f)\n",
 				regression.Name,
 				regression.Metric,
 				regression.ChangePercent,
@@ -58,6 +58,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	fmt.Fprintln(stdout, "PASS: no statistically significant regressions above threshold")
+	_, _ = fmt.Fprintln(stdout, "PASS: no statistically significant regressions above threshold")
 	return 0
 }

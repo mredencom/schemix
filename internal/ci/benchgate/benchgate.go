@@ -28,7 +28,7 @@ func ParseAndCheck(path string, threshold float64) ([]Regression, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open benchstat CSV: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	return parseAndCheck(f, threshold)
 }

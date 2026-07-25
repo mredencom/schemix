@@ -277,7 +277,6 @@ func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 // exact is false when an integer bound cannot be represented as int64, which
 // disables the fast path so CUE remains the correctness oracle.
 func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exact bool) {
-	exact = true
 	for _, sub := range vals {
 		subOp, subVals := sub.Expr()
 		switch subOp {

@@ -24,7 +24,8 @@ func pipelineExample() {
 	}
 
 	// Register as Bloblang method — this.process_schema(name: "xxx")
-	if err := reg.RegisterMethods(); err != nil {
+	env := bloblang.NewEnvironment()
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		log.Fatal(err)
 	}
 
@@ -41,7 +42,7 @@ func pipelineExample() {
 			{"status": "rejected", "errors": $r.errors.map_each("[" + this.code + "] " + this.message)}
 		}
 	`
-	exec, err := bloblang.Parse(mapping)
+	exec, err := env.Parse(mapping)
 	if err != nil {
 		log.Fatal(err)
 	}
