@@ -58,4 +58,10 @@ func main() {
 
 	fmt.Println("\n18. Built-in validation methods (37+):")
 	builtinValidatorsExample()
+
+	fmt.Println("\n19. Complete API showcase (e-commerce scenario):")
+	completeExample()
+
+	fmt.Println("\n20. Flexible input API (struct/JSON/Processable):")
+	flexibleInputExample()
 }
