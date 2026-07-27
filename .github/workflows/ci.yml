@@ -50,7 +50,7 @@ jobs:
           awk -v coverage="$coverage" 'BEGIN { exit !(coverage >= 70) }'
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
