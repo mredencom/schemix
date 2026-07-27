@@ -12,10 +12,10 @@ import (
 
 // Order is a typical request struct with json tags.
 type Order struct {
-	OrderID  string  `json:"order_id"`
-	Amount   int64   `json:"amount"`
-	Currency string  `json:"currency"`
-	Memo     string  `json:"memo,omitempty"`
+	OrderID  string `json:"order_id"`
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	Memo     string `json:"memo,omitempty"`
 }
 
 // Payment implements schemix.Processable for full control over map conversion.
