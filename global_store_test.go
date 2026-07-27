@@ -190,7 +190,7 @@ func TestGlobalStore_ValidateWith(t *testing.T) {
 		t.Errorf("expected valid, got: %v", errs)
 	}
 
-	valid, errs = ValidateWith("check", map[string]any{"code": "bad"})
+	valid, _ = ValidateWith("check", map[string]any{"code": "bad"})
 	if valid {
 		t.Error("expected invalid")
 	}

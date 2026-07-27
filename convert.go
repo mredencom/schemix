@@ -45,7 +45,7 @@ func toMapAny(data any) (map[string]any, error) {
 
 	// Struct path: use reflection to check, then JSON round-trip
 	rv := reflect.ValueOf(data)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil, fmt.Errorf("schemix: input is nil pointer")
 		}

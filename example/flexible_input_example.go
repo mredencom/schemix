@@ -94,7 +94,7 @@ func flexibleInputExample() {
 	fmt.Printf("    invalid struct: valid=%v, errors=%d\n", r.Valid, len(r.Errors))
 
 	// ── ValidateStruct: generic + fast path ──
-	valid, errs = schemix.ValidateStruct(flexSchema, Order{OrderID: "ORD-88888", Amount: 1, Currency: "EUR"})
+	valid, _ = schemix.ValidateStruct(flexSchema, Order{OrderID: "ORD-88888", Amount: 1, Currency: "EUR"})
 	fmt.Printf("    ValidateStruct: valid=%v\n", valid)
 
 	// ── ProcessValueWithMode ──
