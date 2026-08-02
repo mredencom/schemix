@@ -52,9 +52,9 @@ func (v *Validator) formatMessage(code ErrorCode, path, detail string) string {
 	return detail
 }
 
-// parseBloblang compiles a Bloblang mapping string using the Validator's
+// parseBlob compiles a Bloblang mapping string using the Validator's
 // isolated environment (if one exists) or the global environment.
-func (v *Validator) parseBloblang(mapping string) (*bloblang.Executor, error) {
+func (v *Validator) parseBlob(mapping string) (*bloblang.Executor, error) {
 	if v.blobEnv != nil {
 		return v.blobEnv.Parse(mapping)
 	}
@@ -405,7 +405,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 			fullPath = prefix + "." + fieldName
 		}
 
-		meta, err := parsefieldMeta(fieldValue, v.parseBloblang)
+		meta, err := parsefieldMeta(fieldValue, v.parseBlob)
 		if err != nil {
 			return fmt.Errorf("field %q @meta: %w", fullPath, err)
 		}
@@ -423,7 +423,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 					continue
 				}
 				mapping := fmt.Sprintf(blobMappingTemplate, expr)
-				exec, err := v.parseBloblang(mapping)
+				exec, err := v.parseBlob(mapping)
 				if err != nil {
 					return fmt.Errorf("field %q @blob(%s) compile error: %w", fullPath, expr, err)
 				}
