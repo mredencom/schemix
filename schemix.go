@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/cuecontext"
@@ -41,6 +42,7 @@ type Validator struct {
 	cueFields      []cueField            // pre-compiled field descriptors for fast runtime validation
 	errorFormatter ErrorFormatter        // optional custom error message formatter
 	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
+	metrics        MetricsRecorder       // optional observability hook (nil = zero overhead)
 }
 
 // formatMessage returns the user-facing error message. If an ErrorFormatter is
@@ -52,9 +54,9 @@ func (v *Validator) formatMessage(code ErrorCode, path, detail string) string {
 	return detail
 }
 
-// parseBloblang compiles a Bloblang mapping string using the Validator's
+// parseBlob compiles a Bloblang mapping string using the Validator's
 // isolated environment (if one exists) or the global environment.
-func (v *Validator) parseBloblang(mapping string) (*bloblang.Executor, error) {
+func (v *Validator) parseBlob(mapping string) (*bloblang.Executor, error) {
 	if v.blobEnv != nil {
 		return v.blobEnv.Parse(mapping)
 	}
@@ -256,6 +258,7 @@ func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validat
 		schema:         schema,
 		errorFormatter: cfg.errorFormatter,
 		blobEnv:        env,
+		metrics:        cfg.metricsRecorder,
 	}
 
 	if err := v.extractRules(schema, ""); err != nil {
@@ -405,7 +408,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 			fullPath = prefix + "." + fieldName
 		}
 
-		meta, err := parsefieldMeta(fieldValue, v.parseBloblang)
+		meta, err := parsefieldMeta(fieldValue, v.parseBlob)
 		if err != nil {
 			return fmt.Errorf("field %q @meta: %w", fullPath, err)
 		}
@@ -423,7 +426,7 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 					continue
 				}
 				mapping := fmt.Sprintf(blobMappingTemplate, expr)
-				exec, err := v.parseBloblang(mapping)
+				exec, err := v.parseBlob(mapping)
 				if err != nil {
 					return fmt.Errorf("field %q @blob(%s) compile error: %w", fullPath, expr, err)
 				}
@@ -456,10 +459,26 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 	return nil
 }
 
+// withValidationMetrics runs fn and, if a MetricsRecorder is configured,
+// times the call and reports (duration, valid) via ObserveValidation.
+// When no recorder is configured, fn runs with zero added overhead — no
+// timer is started and no interface call is made.
+func (v *Validator) withValidationMetrics(fn func() Result) Result {
+	if v.metrics == nil {
+		return fn()
+	}
+	start := time.Now()
+	result := fn()
+	v.metrics.ObserveValidation(time.Since(start), result.Valid)
+	return result
+}
+
 // Validate performs validation only and returns (valid, errors).
 // Unlike Process, it skips deepCopy and Output construction for better performance.
 func (v *Validator) Validate(data map[string]any) (bool, []ValidationError) {
-	r := v.processInternal(data, FailAll, false)
+	r := v.withValidationMetrics(func() Result {
+		return v.processInternal(data, FailAll, false)
+	})
 	return r.Valid, r.Errors
 }
 
@@ -476,7 +495,9 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
 		}
 	}
-	return v.processInternal(data, mode, true)
+	return v.withValidationMetrics(func() Result {
+		return v.processInternal(data, mode, true)
+	})
 }
 
 // ─── Flexible Input API ──────────────────────────────────────────────────────
@@ -917,20 +938,23 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 
 		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
 		if f.fast != nil {
-			handled, valid, code, detail := validateFast(f.fast, goVal)
-			if handled {
-				if !valid {
+			fr := validateFast(f.fast, goVal)
+			if v.metrics != nil {
+				v.metrics.ObserveFastpathDecision(f.path, fr.Handled)
+			}
+			if fr.Handled {
+				if !fr.Valid {
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
-						Code:    code,
+						Code:    fr.Code,
 						Path:    f.path,
 						Type:    TypeCUE,
-						Message: v.formatMessage(code, f.path, detail),
+						Message: v.formatMessage(fr.Code, f.path, fr.Detail),
 					})
 				}
 				continue
 			}
-			// handled=false: fall through to CUE Unify
+			// fr.Handled=false: fall through to CUE Unify
 		}
 
 		// Only now do we touch CUE for actual constraint validation

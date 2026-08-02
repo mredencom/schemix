@@ -558,15 +558,15 @@ func TestFastpathThreeState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handled, valid, code, _ := validateFast(tt.constraint, tt.val)
-			if handled != tt.wantHandled {
-				t.Errorf("handled = %v, want %v", handled, tt.wantHandled)
+			fr := validateFast(tt.constraint, tt.val)
+			if fr.Handled != tt.wantHandled {
+				t.Errorf("handled = %v, want %v", fr.Handled, tt.wantHandled)
 			}
-			if valid != tt.wantValid {
-				t.Errorf("valid = %v, want %v", valid, tt.wantValid)
+			if fr.Valid != tt.wantValid {
+				t.Errorf("valid = %v, want %v", fr.Valid, tt.wantValid)
 			}
-			if tt.wantCode != "" && code != tt.wantCode {
-				t.Errorf("code = %v, want %v", code, tt.wantCode)
+			if tt.wantCode != "" && fr.Code != tt.wantCode {
+				t.Errorf("code = %v, want %v", fr.Code, tt.wantCode)
 			}
 		})
 	}

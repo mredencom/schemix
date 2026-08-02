@@ -184,10 +184,11 @@ type Option func(*validatorConfig)
 type validatorConfig struct {
 	errorFormatter       ErrorFormatter
 	customFuncs          []customFuncEntry
-	funcMapErr           error    // propagated from FuncMap validation
-	allowMethodOverrides []string // built-in method names allowed to be overridden
-	allowFuncOverrides   []string // built-in function names allowed to be overridden
-	overrideAll          bool     // disable all conflict checks
+	funcMapErr           error           // propagated from FuncMap validation
+	allowMethodOverrides []string        // built-in method names allowed to be overridden
+	allowFuncOverrides   []string        // built-in function names allowed to be overridden
+	overrideAll          bool            // disable all conflict checks
+	metricsRecorder      MetricsRecorder // optional observability hook (nil = zero overhead)
 }
 
 // customFuncEntry stores one custom function/method registration.

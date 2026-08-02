@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"testing"
+	"time"
 )
 
 // ---------- Core Validator Benchmarks ----------
@@ -32,6 +33,25 @@ func BenchmarkNew(b *testing.B) {
 
 func BenchmarkProcess_Valid(b *testing.B) {
 	v := MustNew(benchSchema)
+	b.ResetTimer()
+	for b.Loop() {
+		v.Process(benchDataValid)
+	}
+}
+
+// noopRecorder is a MetricsRecorder that discards everything. Used to measure
+// the overhead of the metrics hook itself, isolated from any real backend
+// (e.g. Prometheus histogram bucket lookups) which would add further cost.
+type noopRecorder struct{}
+
+func (noopRecorder) ObserveValidation(d time.Duration, valid bool)      {}
+func (noopRecorder) ObserveFastpathDecision(fieldPath string, hit bool) {}
+
+// BenchmarkProcess_WithMetrics quantifies the cost of attaching a
+// MetricsRecorder, for comparison against BenchmarkProcess_Valid (which has
+// none attached and must show zero additional overhead).
+func BenchmarkProcess_WithMetrics(b *testing.B) {
+	v := MustNew(benchSchema, WithMetricsRecorder(noopRecorder{}))
 	b.ResetTimer()
 	for b.Loop() {
 		v.Process(benchDataValid)
