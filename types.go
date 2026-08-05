@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/warpstreamlabs/bento/public/bloblang"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ErrorCode is a structured error identifier with format E{layer}{category}{seq}.
@@ -190,6 +191,7 @@ type validatorConfig struct {
 	overrideAll          bool            // disable all conflict checks
 	metricsRecorder      MetricsRecorder // optional observability hook (nil = zero overhead)
 	schemaName           string          // optional name for observability labels
+	tracerProvider       trace.TracerProvider // optional OTel tracer provider (nil = no tracing)
 }
 
 // customFuncEntry stores one custom function/method registration.

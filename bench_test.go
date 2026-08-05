@@ -1,8 +1,11 @@
 package schemix
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // ---------- Core Validator Benchmarks ----------
@@ -44,10 +47,10 @@ func BenchmarkProcess_Valid(b *testing.B) {
 // (e.g. Prometheus histogram bucket lookups) which would add further cost.
 type noopRecorder struct{}
 
-func (noopRecorder) ObserveValidation(d time.Duration, valid bool, schemaName string)      {}
-func (noopRecorder) ObserveFastpathDecision(fieldPath string, hit bool)                    {}
-func (noopRecorder) ObserveErrorCode(code ErrorCode, schemaName string)                    {}
-func (noopRecorder) ObserveBlobExecution(fieldPath string, d time.Duration, success bool)  {}
+func (noopRecorder) ObserveValidation(d time.Duration, valid bool, schemaName string) {}
+func (noopRecorder) ObserveFastpathDecision(fieldPath string, hit bool)               {}
+func (noopRecorder) ObserveErrorCode(code ErrorCode, schemaName string)               {}
+func (noopRecorder) ObserveBlobExecution(fieldPath string, d time.Duration, success bool) {}
 func (noopRecorder) ObserveLayerDuration(layer string, d time.Duration, schemaName string) {}
 
 // BenchmarkProcess_WithMetrics quantifies the cost of attaching a
@@ -58,6 +61,29 @@ func BenchmarkProcess_WithMetrics(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		v.Process(benchDataValid)
+	}
+}
+
+// BenchmarkProcessContext_NoopTracer measures the overhead of a noop
+// TracerProvider on ProcessContext. Should be ≤50ns above BenchmarkProcess_Valid.
+func BenchmarkProcessContext_NoopTracer(b *testing.B) {
+	tp := noop.NewTracerProvider()
+	v := MustNew(benchSchema, WithTracerProvider(tp))
+	ctx := context.Background()
+	b.ResetTimer()
+	for b.Loop() {
+		v.ProcessContext(ctx, benchDataValid)
+	}
+}
+
+// BenchmarkProcessContext_NoTracer is ProcessContext with no tracer configured.
+// Should be identical to BenchmarkProcess_Valid (zero overhead).
+func BenchmarkProcessContext_NoTracer(b *testing.B) {
+	v := MustNew(benchSchema)
+	ctx := context.Background()
+	b.ResetTimer()
+	for b.Loop() {
+		v.ProcessContext(ctx, benchDataValid)
 	}
 }
 
