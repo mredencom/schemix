@@ -526,7 +526,7 @@ func (v *Validator) withValidationMetricsCtx(ctx context.Context, mode FailMode,
 // Unlike Process, it skips deepCopy and Output construction for better performance.
 func (v *Validator) Validate(data map[string]any) (bool, []ValidationError) {
 	r := v.withValidationMetrics(func() Result {
-		return v.processInternal(nil, data, FailAll, false)
+		return v.processInternal(context.Background(), data, FailAll, false)
 	})
 	return r.Valid, r.Errors
 }
@@ -545,7 +545,7 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 		}
 	}
 	return v.withValidationMetrics(func() Result {
-		return v.processInternal(nil, data, mode, true)
+		return v.processInternal(context.Background(), data, mode, true)
 	})
 }
 
@@ -628,7 +628,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 
 	// Layer 1: CUE validation using pre-compiled field descriptors
 	var cueSpan trace.Span
-	if ctx != nil && v.tracer != nil {
+	if v.tracer != nil && trace.SpanFromContext(ctx).IsRecording() {
 		_, cueSpan = v.tracer.Start(ctx, "schemix.cue", trace.WithSpanKind(trace.SpanKindInternal))
 	}
 	var cueStart time.Time
@@ -677,7 +677,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 
 	// Layer 2: @blob + @meta rules
 	var blobSpan trace.Span
-	if ctx != nil && v.tracer != nil {
+	if v.tracer != nil && trace.SpanFromContext(ctx).IsRecording() {
 		_, blobSpan = v.tracer.Start(ctx, "schemix.blob", trace.WithSpanKind(trace.SpanKindInternal))
 	}
 	var blobStart time.Time
