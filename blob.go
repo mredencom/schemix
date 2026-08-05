@@ -32,7 +32,7 @@ func NewRegistry() *Registry {
 // Register compiles and stores a named validator from a CUE schema string.
 // It uses the registry's shared CUE context for efficient memory usage.
 func (r *Registry) Register(name, cueSrc string) error {
-	v, err := NewWithContext(r.cueCtx, cueSrc)
+	v, err := NewWithContext(r.cueCtx, cueSrc, WithName(name))
 	if err != nil {
 		return fmt.Errorf("register %q: %w", name, err)
 	}

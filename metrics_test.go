@@ -12,11 +12,15 @@ type fakeRecorder struct {
 	mu              sync.Mutex
 	validationCalls []validationObservation
 	fastpathCalls   []fastpathObservation
+	errorCodeCalls  []errorCodeObservation
+	blobExecCalls   []blobExecObservation
+	layerDurCalls   []layerDurObservation
 }
 
 type validationObservation struct {
-	duration time.Duration
-	valid    bool
+	duration   time.Duration
+	valid      bool
+	schemaName string
 }
 
 type fastpathObservation struct {
@@ -24,16 +28,51 @@ type fastpathObservation struct {
 	hit       bool
 }
 
-func (f *fakeRecorder) ObserveValidation(d time.Duration, valid bool) {
+type errorCodeObservation struct {
+	code       ErrorCode
+	schemaName string
+}
+
+type blobExecObservation struct {
+	fieldPath string
+	duration  time.Duration
+	success   bool
+}
+
+type layerDurObservation struct {
+	layer      string
+	duration   time.Duration
+	schemaName string
+}
+
+func (f *fakeRecorder) ObserveValidation(d time.Duration, valid bool, schemaName string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.validationCalls = append(f.validationCalls, validationObservation{duration: d, valid: valid})
+	f.validationCalls = append(f.validationCalls, validationObservation{duration: d, valid: valid, schemaName: schemaName})
 }
 
 func (f *fakeRecorder) ObserveFastpathDecision(fieldPath string, hit bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fastpathCalls = append(f.fastpathCalls, fastpathObservation{fieldPath: fieldPath, hit: hit})
+}
+
+func (f *fakeRecorder) ObserveErrorCode(code ErrorCode, schemaName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errorCodeCalls = append(f.errorCodeCalls, errorCodeObservation{code: code, schemaName: schemaName})
+}
+
+func (f *fakeRecorder) ObserveBlobExecution(fieldPath string, d time.Duration, success bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobExecCalls = append(f.blobExecCalls, blobExecObservation{fieldPath: fieldPath, duration: d, success: success})
+}
+
+func (f *fakeRecorder) ObserveLayerDuration(layer string, d time.Duration, schemaName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.layerDurCalls = append(f.layerDurCalls, layerDurObservation{layer: layer, duration: d, schemaName: schemaName})
 }
 
 func (f *fakeRecorder) validationCallCount() int {
@@ -56,9 +95,6 @@ func TestMetricsRecorder_NotConfigured_NoCallsRecorded(t *testing.T) {
 	if !r.Valid {
 		t.Fatalf("expected valid, got errors: %v", r.Errors)
 	}
-	// No recorder attached — nothing to assert on calls, but this documents
-	// baseline behavior: Process must succeed identically with or without
-	// the metrics feature compiled in.
 }
 
 func TestMetricsRecorder_ObserveValidation_CalledOnceOnValid(t *testing.T) {

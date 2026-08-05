@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	cueerrors "cuelang.org/go/cue/errors"
 	"github.com/warpstreamlabs/bento/public/bloblang"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // cueField is a pre-compiled field descriptor extracted at schema parse time.
@@ -43,6 +45,8 @@ type Validator struct {
 	errorFormatter ErrorFormatter        // optional custom error message formatter
 	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
 	metrics        MetricsRecorder       // optional observability hook (nil = zero overhead)
+	schemaName     string                // optional name for observability labels
+	tracer         trace.Tracer          // nil = zero tracing overhead
 }
 
 // formatMessage returns the user-facing error message. If an ErrorFormatter is
@@ -259,6 +263,8 @@ func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validat
 		errorFormatter: cfg.errorFormatter,
 		blobEnv:        env,
 		metrics:        cfg.metricsRecorder,
+		schemaName:     cfg.schemaName,
+		tracer:         buildTracer(cfg.tracerProvider),
 	}
 
 	if err := v.extractRules(schema, ""); err != nil {
@@ -460,7 +466,8 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 }
 
 // withValidationMetrics runs fn and, if a MetricsRecorder is configured,
-// times the call and reports (duration, valid) via ObserveValidation.
+// times the call and reports (duration, valid, schemaName) via ObserveValidation.
+// It also reports each error code via ObserveErrorCode.
 // When no recorder is configured, fn runs with zero added overhead — no
 // timer is started and no interface call is made.
 func (v *Validator) withValidationMetrics(fn func() Result) Result {
@@ -469,7 +476,49 @@ func (v *Validator) withValidationMetrics(fn func() Result) Result {
 	}
 	start := time.Now()
 	result := fn()
-	v.metrics.ObserveValidation(time.Since(start), result.Valid)
+	v.metrics.ObserveValidation(time.Since(start), result.Valid, v.schemaName)
+	for i := range result.Errors {
+		v.metrics.ObserveErrorCode(result.Errors[i].Code, v.schemaName)
+	}
+	return result
+}
+
+// withValidationMetricsCtx is the context-aware counterpart of withValidationMetrics.
+// It handles BOTH metrics recording AND root span creation/finalization for context-aware methods.
+// When neither metrics nor tracer is configured, fn runs with zero added overhead.
+func (v *Validator) withValidationMetricsCtx(ctx context.Context, mode FailMode, fn func(context.Context) Result) Result {
+	if v.metrics == nil && v.tracer == nil {
+		return fn(ctx)
+	}
+
+	// Start root span if tracer is configured.
+	var span trace.Span
+	if v.tracer != nil {
+		ctx, span = v.tracer.Start(ctx, "schemix.process", trace.WithSpanKind(trace.SpanKindInternal))
+	}
+
+	// Start timer if metrics are configured.
+	var start time.Time
+	if v.metrics != nil {
+		start = time.Now()
+	}
+
+	result := fn(ctx)
+
+	// Report metrics.
+	if v.metrics != nil {
+		v.metrics.ObserveValidation(time.Since(start), result.Valid, v.schemaName)
+		for i := range result.Errors {
+			v.metrics.ObserveErrorCode(result.Errors[i].Code, v.schemaName)
+		}
+	}
+
+	// Report tracing.
+	if span != nil {
+		recordSpanResult(span, &result, v.schemaName, mode, len(v.cueFields))
+		span.End()
+	}
+
 	return result
 }
 
@@ -477,7 +526,7 @@ func (v *Validator) withValidationMetrics(fn func() Result) Result {
 // Unlike Process, it skips deepCopy and Output construction for better performance.
 func (v *Validator) Validate(data map[string]any) (bool, []ValidationError) {
 	r := v.withValidationMetrics(func() Result {
-		return v.processInternal(data, FailAll, false)
+		return v.processInternal(context.Background(), data, FailAll, false)
 	})
 	return r.Valid, r.Errors
 }
@@ -496,7 +545,7 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 		}
 	}
 	return v.withValidationMetrics(func() Result {
-		return v.processInternal(data, mode, true)
+		return v.processInternal(context.Background(), data, mode, true)
 	})
 }
 
@@ -561,7 +610,8 @@ func validateFailMode(mode FailMode) error {
 
 // processInternal is the unified validation/processing engine.
 // When needOutput is false, it skips deepCopy and all Output mutations for performance.
-func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutput bool) (result Result) {
+// When ctx is non-nil and v.tracer is set, child spans for CUE and Blob layers are created.
+func (v *Validator) processInternal(ctx context.Context, data map[string]any, mode FailMode, needOutput bool) (result Result) {
 	result = Result{
 		Valid:  true,
 		Errors: []ValidationError{},
@@ -577,8 +627,22 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	}
 
 	// Layer 1: CUE validation using pre-compiled field descriptors
+	var cueSpan trace.Span
+	if v.tracer != nil && trace.SpanFromContext(ctx).IsRecording() {
+		_, cueSpan = v.tracer.Start(ctx, "schemix.cue", trace.WithSpanKind(trace.SpanKindInternal))
+	}
+	var cueStart time.Time
+	if v.metrics != nil {
+		cueStart = time.Now()
+	}
 	dataValue := v.ctx.Encode(data)
 	v.validateCUEFields(v.cueFields, dataValue, data, &result)
+	if v.metrics != nil {
+		v.metrics.ObserveLayerDuration(LayerCUE, time.Since(cueStart), v.schemaName)
+	}
+	if cueSpan != nil {
+		cueSpan.End()
+	}
 
 	if mode == FailFast && !result.Valid {
 		if len(result.Errors) > 1 {
@@ -612,6 +676,14 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	cueErrors := append([]ValidationError(nil), result.Errors...)
 
 	// Layer 2: @blob + @meta rules
+	var blobSpan trace.Span
+	if v.tracer != nil && trace.SpanFromContext(ctx).IsRecording() {
+		_, blobSpan = v.tracer.Start(ctx, "schemix.blob", trace.WithSpanKind(trace.SpanKindInternal))
+	}
+	var blobStart time.Time
+	if v.metrics != nil {
+		blobStart = time.Now()
+	}
 	failedPaths := map[string]bool{}
 	currentPriority := -1
 	priorityHasError := false
@@ -767,7 +839,14 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 
 		// @blob execution
 		if rule.Exec != nil {
+			var execStart time.Time
+			if v.metrics != nil {
+				execStart = time.Now()
+			}
 			res, err := rule.Exec.Query(data)
+			if v.metrics != nil {
+				v.metrics.ObserveBlobExecution(rule.Path, time.Since(execStart), err == nil)
+			}
 			if err != nil {
 				detail := fmt.Sprintf("expression error: %v", err)
 				result.Valid = false
@@ -817,6 +896,12 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 				}
 			}
 		}
+	}
+	if v.metrics != nil {
+		v.metrics.ObserveLayerDuration(LayerBlob, time.Since(blobStart), v.schemaName)
+	}
+	if blobSpan != nil {
+		blobSpan.End()
 	}
 
 	return result
