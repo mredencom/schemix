@@ -85,7 +85,7 @@ graph TD
 go get github.com/mredencom/schemix@latest
 ```
 
-> **Requires:** Go 1.26.5 or newer
+> **Requires:** Go 1.25.0 or newer
 
 ## Quick Start
 

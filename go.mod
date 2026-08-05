@@ -1,10 +1,10 @@
 module github.com/mredencom/schemix
 
-go 1.26.5
+go 1.25.0
 
 require (
 	cuelang.org/go v0.17.1
-	github.com/warpstreamlabs/bento v1.19.0
+	github.com/warpstreamlabs/bento v1.17.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0

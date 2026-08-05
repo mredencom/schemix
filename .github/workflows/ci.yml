@@ -18,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.26.5'
+          go-version: '1.25.0'
           cache-dependency-path: go.sum
 
       - name: Download dependencies
@@ -64,7 +64,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.26.5'
+          go-version: '1.25.0'
           cache-dependency-path: go.sum
 
       - name: golangci-lint
@@ -94,7 +94,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.26.5'
+          go-version: stable
           cache-dependency-path: |
             base/go.sum
             head/go.sum

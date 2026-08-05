@@ -85,7 +85,7 @@ graph TD
 go get github.com/mredencom/schemix@latest
 ```
 
-> **要求：** Go 1.26.5 或更高版本
+> **要求：** Go 1.25.0 或更高版本
 
 ## 快速开始
 

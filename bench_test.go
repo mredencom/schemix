@@ -284,3 +284,37 @@ func BenchmarkBlob_RulesOnly(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkValidate_NoDeepCopy(b *testing.B) {
+	v := MustNew(benchSchema)
+
+	b.Run("Process", func(b *testing.B) {
+		for b.Loop() {
+			v.Process(benchDataValid)
+		}
+	})
+
+	b.Run("Validate", func(b *testing.B) {
+		for b.Loop() {
+			v.Validate(benchDataValid)
+		}
+	})
+}
+
+// BenchmarkValidate_NoDeepCopy_Nested compares with nested data to amplify the
+// deepCopy savings.
+func BenchmarkValidate_NoDeepCopy_Nested(b *testing.B) {
+	v := MustNew(benchNestedSchema)
+
+	b.Run("Process", func(b *testing.B) {
+		for b.Loop() {
+			v.Process(benchNestedData)
+		}
+	})
+
+	b.Run("Validate", func(b *testing.B) {
+		for b.Loop() {
+			v.Validate(benchNestedData)
+		}
+	})
+}
