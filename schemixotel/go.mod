@@ -1,6 +1,6 @@
 module github.com/mredencom/schemix/schemixotel
 
-go 1.26.5
+go 1.25.0
 
 require (
 	github.com/mredencom/schemix v0.0.0
@@ -29,7 +29,7 @@ require (
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20260420112717-c39628bde8b5 // indirect
 	github.com/segmentio/ksuid v1.0.4 // indirect
 	github.com/tilinna/z85 v1.0.0 // indirect
-	github.com/warpstreamlabs/bento v1.19.0 // indirect
+	github.com/warpstreamlabs/bento v1.17.0 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
