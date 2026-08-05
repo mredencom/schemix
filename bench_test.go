@@ -44,8 +44,11 @@ func BenchmarkProcess_Valid(b *testing.B) {
 // (e.g. Prometheus histogram bucket lookups) which would add further cost.
 type noopRecorder struct{}
 
-func (noopRecorder) ObserveValidation(d time.Duration, valid bool)      {}
-func (noopRecorder) ObserveFastpathDecision(fieldPath string, hit bool) {}
+func (noopRecorder) ObserveValidation(d time.Duration, valid bool, schemaName string)      {}
+func (noopRecorder) ObserveFastpathDecision(fieldPath string, hit bool)                    {}
+func (noopRecorder) ObserveErrorCode(code ErrorCode, schemaName string)                    {}
+func (noopRecorder) ObserveBlobExecution(fieldPath string, d time.Duration, success bool)  {}
+func (noopRecorder) ObserveLayerDuration(layer string, d time.Duration, schemaName string) {}
 
 // BenchmarkProcess_WithMetrics quantifies the cost of attaching a
 // MetricsRecorder, for comparison against BenchmarkProcess_Valid (which has

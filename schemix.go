@@ -43,6 +43,7 @@ type Validator struct {
 	errorFormatter ErrorFormatter        // optional custom error message formatter
 	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
 	metrics        MetricsRecorder       // optional observability hook (nil = zero overhead)
+	schemaName     string                // optional name for observability labels
 }
 
 // formatMessage returns the user-facing error message. If an ErrorFormatter is
@@ -259,6 +260,7 @@ func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validat
 		errorFormatter: cfg.errorFormatter,
 		blobEnv:        env,
 		metrics:        cfg.metricsRecorder,
+		schemaName:     cfg.schemaName,
 	}
 
 	if err := v.extractRules(schema, ""); err != nil {
@@ -460,7 +462,8 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 }
 
 // withValidationMetrics runs fn and, if a MetricsRecorder is configured,
-// times the call and reports (duration, valid) via ObserveValidation.
+// times the call and reports (duration, valid, schemaName) via ObserveValidation.
+// It also reports each error code via ObserveErrorCode.
 // When no recorder is configured, fn runs with zero added overhead — no
 // timer is started and no interface call is made.
 func (v *Validator) withValidationMetrics(fn func() Result) Result {
@@ -469,7 +472,10 @@ func (v *Validator) withValidationMetrics(fn func() Result) Result {
 	}
 	start := time.Now()
 	result := fn()
-	v.metrics.ObserveValidation(time.Since(start), result.Valid)
+	v.metrics.ObserveValidation(time.Since(start), result.Valid, v.schemaName)
+	for i := range result.Errors {
+		v.metrics.ObserveErrorCode(result.Errors[i].Code, v.schemaName)
+	}
 	return result
 }
 
@@ -577,8 +583,15 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	}
 
 	// Layer 1: CUE validation using pre-compiled field descriptors
+	var cueStart time.Time
+	if v.metrics != nil {
+		cueStart = time.Now()
+	}
 	dataValue := v.ctx.Encode(data)
 	v.validateCUEFields(v.cueFields, dataValue, data, &result)
+	if v.metrics != nil {
+		v.metrics.ObserveLayerDuration(LayerCUE, time.Since(cueStart), v.schemaName)
+	}
 
 	if mode == FailFast && !result.Valid {
 		if len(result.Errors) > 1 {
@@ -612,6 +625,10 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 	cueErrors := append([]ValidationError(nil), result.Errors...)
 
 	// Layer 2: @blob + @meta rules
+	var blobStart time.Time
+	if v.metrics != nil {
+		blobStart = time.Now()
+	}
 	failedPaths := map[string]bool{}
 	currentPriority := -1
 	priorityHasError := false
@@ -767,7 +784,14 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 
 		// @blob execution
 		if rule.Exec != nil {
+			var execStart time.Time
+			if v.metrics != nil {
+				execStart = time.Now()
+			}
 			res, err := rule.Exec.Query(data)
+			if v.metrics != nil {
+				v.metrics.ObserveBlobExecution(rule.Path, time.Since(execStart), err == nil)
+			}
 			if err != nil {
 				detail := fmt.Sprintf("expression error: %v", err)
 				result.Valid = false
@@ -817,6 +841,9 @@ func (v *Validator) processInternal(data map[string]any, mode FailMode, needOutp
 				}
 			}
 		}
+	}
+	if v.metrics != nil {
+		v.metrics.ObserveLayerDuration(LayerBlob, time.Since(blobStart), v.schemaName)
 	}
 
 	return result

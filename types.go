@@ -189,6 +189,7 @@ type validatorConfig struct {
 	allowFuncOverrides   []string        // built-in function names allowed to be overridden
 	overrideAll          bool            // disable all conflict checks
 	metricsRecorder      MetricsRecorder // optional observability hook (nil = zero overhead)
+	schemaName           string          // optional name for observability labels
 }
 
 // customFuncEntry stores one custom function/method registration.
