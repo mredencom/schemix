@@ -365,42 +365,6 @@ func TestValidate_MetaConditionalRequired(t *testing.T) {
 	})
 }
 
-// BenchmarkValidate_NoDeepCopy compares Validate vs Process to show that
-// Validate avoids the deepCopy overhead.
-func BenchmarkValidate_NoDeepCopy(b *testing.B) {
-	v := MustNew(benchSchema)
-
-	b.Run("Process", func(b *testing.B) {
-		for b.Loop() {
-			v.Process(benchDataValid)
-		}
-	})
-
-	b.Run("Validate", func(b *testing.B) {
-		for b.Loop() {
-			v.Validate(benchDataValid)
-		}
-	})
-}
-
-// BenchmarkValidate_NoDeepCopy_Nested compares with nested data to amplify the
-// deepCopy savings.
-func BenchmarkValidate_NoDeepCopy_Nested(b *testing.B) {
-	v := MustNew(benchNestedSchema)
-
-	b.Run("Process", func(b *testing.B) {
-		for b.Loop() {
-			v.Process(benchNestedData)
-		}
-	})
-
-	b.Run("Validate", func(b *testing.B) {
-		for b.Loop() {
-			v.Validate(benchNestedData)
-		}
-	})
-}
-
 // ========== Result Chain API ==========
 
 func TestResult_HasCode(t *testing.T) {
@@ -1064,5 +1028,242 @@ func TestFields_EmptyStruct(t *testing.T) {
 	}
 	if len(fields) != 0 {
 		t.Errorf("expected 0 fields, got %d", len(fields))
+	}
+}
+
+// ========== Result convenience methods (moved from registry_test.go) ==========
+
+func TestResult_Err_Valid(t *testing.T) {
+	r := Result{Valid: true, Errors: []ValidationError{}}
+	if err := r.Err(); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestResult_Err_Invalid(t *testing.T) {
+	r := Result{
+		Valid: false,
+		Errors: []ValidationError{
+			{Code: CodeTypeMismatch, Path: "name", Type: TypeCUE, Message: "type error"},
+			{Code: CodeRangeViolation, Path: "age", Type: TypeCUE, Message: "out of range"},
+		},
+	}
+	err := r.Err()
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	s := err.Error()
+	if !strings.Contains(s, "name") || !strings.Contains(s, "age") {
+		t.Errorf("error should mention both fields, got: %s", s)
+	}
+}
+
+func TestResult_FirstError(t *testing.T) {
+	r := Result{
+		Valid: false,
+		Errors: []ValidationError{
+			{Code: CodeTypeMismatch, Path: "x", Type: TypeCUE, Message: "first"},
+			{Code: CodeRangeViolation, Path: "y", Type: TypeCUE, Message: "second"},
+		},
+	}
+	first := r.FirstError()
+	if first == nil || first.Message != "first" {
+		t.Errorf("expected first error, got %v", first)
+	}
+}
+
+func TestResult_FirstError_Empty(t *testing.T) {
+	r := Result{Valid: true, Errors: []ValidationError{}}
+	if r.FirstError() != nil {
+		t.Error("expected nil for valid result")
+	}
+}
+
+func TestResult_ErrorsByPath(t *testing.T) {
+	r := Result{
+		Valid: false,
+		Errors: []ValidationError{
+			{Path: "a"}, {Path: "b"}, {Path: "a"},
+		},
+	}
+	got := r.ErrorsByPath("a")
+	if len(got) != 2 {
+		t.Errorf("expected 2 errors for path 'a', got %d", len(got))
+	}
+}
+
+func TestResult_Errors_NotNil(t *testing.T) {
+	v := MustNew(`{ name: string }`)
+	r := v.Process(map[string]any{"name": "ok"})
+	if r.Errors == nil {
+		t.Error("Errors should be empty slice, not nil")
+	}
+	if len(r.Errors) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(r.Errors))
+	}
+}
+
+// ========== ValidationError implements error ==========
+
+func TestValidationError_Error(t *testing.T) {
+	e := ValidationError{
+		Code: CodeTypeMismatch, Path: "name", Type: TypeCUE, Message: "conflicting values",
+	}
+	s := e.Error()
+	if s != "[E1T01] name: conflicting values" {
+		t.Errorf("unexpected error string: %s", s)
+	}
+}
+
+// ========== MustNew ==========
+
+func TestMustNew_Success(t *testing.T) {
+	v := MustNew(`{ name: string }`)
+	if v == nil {
+		t.Fatal("expected non-nil validator")
+	}
+}
+
+func TestMustNew_Panic(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid schema")
+		}
+	}()
+	MustNew(`{ invalid schema !!!`)
+}
+
+// ========== NewWithContext ==========
+
+func TestNewWithContext_SharedContext(t *testing.T) {
+	// Create two validators sharing the same context
+	reg := NewRegistry()
+	if err := reg.Register("a", `{ x: string }`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register("b", `{ y: int }`); err != nil {
+		t.Fatal(err)
+	}
+	va, _ := reg.Get("a")
+	vb, _ := reg.Get("b")
+
+	// Both should work independently
+	r := va.Process(map[string]any{"x": "hello"})
+	if !r.Valid {
+		t.Error("expected a to be valid")
+	}
+	r = vb.Process(map[string]any{"y": int64(42)})
+	if !r.Valid {
+		t.Error("expected b to be valid")
+	}
+}
+
+// ========== Process preserves int64 in output ==========
+
+func TestProcess_PreservesInt64InOutput(t *testing.T) {
+	v := MustNew(`{
+		amount: int & >0
+		doubled: number @blob(this.amount * 2)
+	}`)
+	r := v.Process(map[string]any{"amount": int64(500)})
+	if !r.Valid {
+		t.Fatalf("expected valid, got errors: %v", r.Errors)
+	}
+	// Original field should still be int64
+	if _, ok := r.Output["amount"].(int64); !ok {
+		t.Errorf("expected output.amount to be int64, got %T", r.Output["amount"])
+	}
+}
+
+// ========== deepCopy ==========
+
+func TestDeepCopy_PreservesInt64(t *testing.T) {
+	src := map[string]any{
+		"amount": int64(10000),
+		"nested": map[string]any{
+			"value": int64(42),
+		},
+	}
+	dst := deepCopy(src)
+
+	if v, ok := dst["amount"].(int64); !ok || v != 10000 {
+		t.Errorf("expected int64(10000), got %T(%v)", dst["amount"], dst["amount"])
+	}
+	nested := dst["nested"].(map[string]any)
+	if v, ok := nested["value"].(int64); !ok || v != 42 {
+		t.Errorf("expected int64(42), got %T(%v)", nested["value"], nested["value"])
+	}
+
+	// Mutating dst should not affect src
+	dst["amount"] = int64(0)
+	if src["amount"] != int64(10000) {
+		t.Error("deepCopy did not isolate src from dst")
+	}
+}
+
+func TestDeepCopy_PreservesSlice(t *testing.T) {
+	src := map[string]any{
+		"items": []any{
+			map[string]any{"id": int64(1)},
+			map[string]any{"id": int64(2)},
+		},
+	}
+	dst := deepCopy(src)
+
+	items := dst["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	item0 := items[0].(map[string]any)
+	if v, ok := item0["id"].(int64); !ok || v != 1 {
+		t.Errorf("expected int64(1), got %T(%v)", item0["id"], item0["id"])
+	}
+
+	// Mutating dst slice should not affect src
+	items[0].(map[string]any)["id"] = int64(99)
+	srcItems := src["items"].([]any)
+	if srcItems[0].(map[string]any)["id"] != int64(1) {
+		t.Error("deepCopy did not isolate slice elements")
+	}
+}
+
+func TestDeepCopy_NilMap(t *testing.T) {
+	if got := deepCopy(nil); got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+// ========== isEmpty ==========
+
+func TestIsEmpty(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    any
+		expected bool
+	}{
+		{"nil", nil, true},
+		{"empty string", "", true},
+		{"non-empty string", "hello", false},
+		{"int zero", int(0), true},
+		{"int non-zero", int(42), false},
+		{"int64 zero", int64(0), true},
+		{"int64 non-zero", int64(100), false},
+		{"float64 zero", float64(0), true},
+		{"float64 non-zero", float64(3.14), false},
+		{"bool false", false, true},
+		{"bool true", true, false},
+		{"empty slice", []any{}, true},
+		{"non-empty slice", []any{1}, false},
+		{"empty map", map[string]any{}, true},
+		{"non-empty map", map[string]any{"k": "v"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isEmpty(tt.input)
+			if got != tt.expected {
+				t.Errorf("isEmpty(%v) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
 	}
 }
