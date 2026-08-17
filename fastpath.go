@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 
 	"cuelang.org/go/cue"
 )
@@ -358,6 +359,10 @@ type fastResult struct {
 	Valid   bool
 	Code    ErrorCode
 	Detail  string
+
+	// Suggestion carries the closest valid value for enum violations. Empty for
+	// every other constraint kind — see ValidationError.Suggestion.
+	Suggestion string
 }
 
 // fallbackToCUE signals that the fast path cannot precisely evaluate this
@@ -375,6 +380,17 @@ func pass() fastResult {
 // fail reports that the fast path handled the field and it violates the constraint.
 func fail(code ErrorCode, detail string) fastResult {
 	return fastResult{Handled: true, Valid: false, Code: code, Detail: detail}
+}
+
+// failEnum reports an enum violation, optionally carrying the closest candidate.
+func failEnum(detail, suggestion string) fastResult {
+	return fastResult{
+		Handled:    true,
+		Valid:      false,
+		Code:       CodeEnumInvalid,
+		Detail:     detail,
+		Suggestion: suggestion,
+	}
 }
 
 // validateFast performs pure-Go validation of a field value against a fastConstraint.
@@ -558,7 +574,10 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 				return pass()
 			}
 		}
-		return fail(CodeEnumInvalid, fmt.Sprintf("value %q not in enum", s))
+		return failEnum(
+			stringEnumDetail(s, fc.stringEnums),
+			suggestClosest(s, fc.stringEnums),
+		)
 	}
 
 	if fc.intEnums != nil {
@@ -578,7 +597,7 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 				return pass()
 			}
 		}
-		return fail(CodeEnumInvalid, fmt.Sprintf("value %v not in enum", val))
+		return failEnum(int64EnumDetail(n, fc.intEnums), "")
 	}
 
 	if fc.floatEnums != nil {
@@ -594,10 +613,73 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 				return pass()
 			}
 		}
-		return fail(CodeEnumInvalid, fmt.Sprintf("value %v not in enum", val))
+		return failEnum(float64EnumDetail(n, fc.floatEnums), "")
 	}
 
 	return pass()
+}
+
+// The enum detail builders below assemble the whole message into one buffer.
+// Rendering the candidate list separately and handing it to fmt.Sprintf costs
+// six allocations — one per strconv.Quote, one for the list, two for Sprintf —
+// on a path that runs for every rejected value.
+
+// enumDetailSize estimates the buffer needed so the append loop never grows it.
+func enumDetailSize(gotLen, count, valueLen int) int {
+	const fixed = len(`value  not in enum []`) + 2 // message text plus quotes
+	return fixed + gotLen + count*(valueLen+4)
+}
+
+// stringEnumDetail renders `value "USE" not in enum ["CNY", "USD"]`.
+func stringEnumDetail(got string, enums []string) string {
+	n := enumDetailSize(len(got), len(enums), 0)
+	for _, e := range enums {
+		n += len(e)
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, "value "...)
+	buf = strconv.AppendQuote(buf, got)
+	buf = append(buf, " not in enum ["...)
+	for i, e := range enums {
+		if i > 0 {
+			buf = append(buf, ", "...)
+		}
+		buf = strconv.AppendQuote(buf, e)
+	}
+	buf = append(buf, ']')
+	return string(buf)
+}
+
+// int64EnumDetail renders `value 5 not in enum [1, 2, 3]`.
+func int64EnumDetail(got int64, enums []int64) string {
+	buf := make([]byte, 0, enumDetailSize(20, len(enums), 20))
+	buf = append(buf, "value "...)
+	buf = strconv.AppendInt(buf, got, 10)
+	buf = append(buf, " not in enum ["...)
+	for i, e := range enums {
+		if i > 0 {
+			buf = append(buf, ", "...)
+		}
+		buf = strconv.AppendInt(buf, e, 10)
+	}
+	buf = append(buf, ']')
+	return string(buf)
+}
+
+// float64EnumDetail renders `value 0.7 not in enum [0.5, 1]`.
+func float64EnumDetail(got float64, enums []float64) string {
+	buf := make([]byte, 0, enumDetailSize(24, len(enums), 24))
+	buf = append(buf, "value "...)
+	buf = strconv.AppendFloat(buf, got, 'g', -1, 64)
+	buf = append(buf, " not in enum ["...)
+	for i, e := range enums {
+		if i > 0 {
+			buf = append(buf, ", "...)
+		}
+		buf = strconv.AppendFloat(buf, e, 'g', -1, 64)
+	}
+	buf = append(buf, ']')
+	return string(buf)
 }
 
 // --- helpers ---

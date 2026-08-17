@@ -232,3 +232,287 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// Error diagnostics: the default message must be actionable on its own.
+//
+// Three gaps this file pins down:
+//   - an enum violation used to say `value "USE" not in enum` without naming a
+//     single valid option;
+//   - a disjunction inside an array produced three errors for one bad field,
+//     leaking CUE internals ("2 errors in empty disjunction");
+//   - errors carried no field type and no correction hint.
+
+func firstError(t *testing.T, schema string, data map[string]any) ValidationError {
+	t.Helper()
+	r := MustNew(schema).Process(data)
+	if r.Valid {
+		t.Fatal("expected validation to fail")
+	}
+	if len(r.Errors) == 0 {
+		t.Fatal("expected at least one error")
+	}
+	return r.Errors[0]
+}
+
+// ─── Enum candidates ────────────────────────────────────────────────────────
+
+func TestEnumErrorListsCandidates(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		data     map[string]any
+		contains []string
+	}{
+		{
+			name:     "string enum",
+			schema:   `{ currency: "CNY" | "USD" | "EUR" }`,
+			data:     map[string]any{"currency": "USE"},
+			contains: []string{"CNY", "USD", "EUR"},
+		},
+		{
+			name:     "int enum",
+			schema:   `{ level: 1 | 2 | 3 }`,
+			data:     map[string]any{"level": int64(5)},
+			contains: []string{"1", "2", "3"},
+		},
+		{
+			name:     "nested string enum",
+			schema:   `{ p: { cur: "CNY" | "USD" } }`,
+			data:     map[string]any{"p": map[string]any{"cur": "XXX"}},
+			contains: []string{"CNY", "USD"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := firstError(t, tt.schema, tt.data)
+			if e.Code != CodeEnumInvalid {
+				t.Fatalf("Code = %s, want %s", e.Code, CodeEnumInvalid)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(e.Message, want) {
+					t.Errorf("Message %q does not name the valid option %q", e.Message, want)
+				}
+			}
+		})
+	}
+}
+
+// ─── Suggestion ─────────────────────────────────────────────────────────────
+
+func TestEnumErrorSuggestsClosestCandidate(t *testing.T) {
+	tests := []struct {
+		name       string
+		schema     string
+		data       map[string]any
+		suggestion string
+	}{
+		{
+			name:       "one character off",
+			schema:     `{ currency: "CNY" | "USD" | "EUR" }`,
+			data:       map[string]any{"currency": "USE"},
+			suggestion: "USD",
+		},
+		{
+			name:       "case difference",
+			schema:     `{ currency: "CNY" | "USD" }`,
+			data:       map[string]any{"currency": "usd"},
+			suggestion: "USD",
+		},
+		{
+			name:       "transposition",
+			schema:     `{ role: "admin" | "guest" }`,
+			data:       map[string]any{"role": "adnim"},
+			suggestion: "admin",
+		},
+		{
+			name:       "nothing close enough",
+			schema:     `{ currency: "CNY" | "USD" }`,
+			data:       map[string]any{"currency": "completely-different"},
+			suggestion: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := firstError(t, tt.schema, tt.data)
+			if e.Suggestion != tt.suggestion {
+				t.Errorf("Suggestion = %q, want %q", e.Suggestion, tt.suggestion)
+			}
+		})
+	}
+}
+
+// TestSuggestionOnlyForEnums documents the deliberate scope: a range or regex
+// violation has no meaningful "did you mean", so the field stays empty.
+func TestSuggestionOnlyForEnums(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		data   map[string]any
+	}{
+		{"range", `{ age: int & >=0 & <=150 }`, map[string]any{"age": int64(999)}},
+		{"regex", `{ pan: =~"^[0-9]{16}$" }`, map[string]any{"pan": "abc"}},
+		{"type", `{ age: int }`, map[string]any{"age": "old"}},
+		{"required", `{ age: int }`, map[string]any{}},
+		{"blob rule", `{ age: int @blob(this.age >= 18) }`, map[string]any{"age": int64(10)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if e := firstError(t, tt.schema, tt.data); e.Suggestion != "" {
+				t.Errorf("Suggestion = %q, want empty for a %s violation", e.Suggestion, tt.name)
+			}
+		})
+	}
+}
+
+// ─── FieldType ──────────────────────────────────────────────────────────────
+
+func TestErrorCarriesFieldType(t *testing.T) {
+	tests := []struct {
+		name      string
+		schema    string
+		data      map[string]any
+		fieldType string
+	}{
+		{"string", `{ pan: =~"^[0-9]{16}$" }`, map[string]any{"pan": "abc"}, "string"},
+		{"int", `{ age: int & >=0 }`, map[string]any{"age": int64(-1)}, "int"},
+		{"number", `{ amount: number & >0 }`, map[string]any{"amount": -1.5}, "number"},
+		{"bool", `{ flag: bool }`, map[string]any{"flag": "yes"}, "bool"},
+		{"nested int", `{ p: { age: int & >0 } }`, map[string]any{"p": map[string]any{"age": int64(-1)}}, "int"},
+		{"struct", `{ p: { x: int } }`, map[string]any{"p": "oops"}, "struct"},
+		{"list", `{ items: [...int] }`, map[string]any{"items": "oops"}, "list"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if e := firstError(t, tt.schema, tt.data); e.FieldType != tt.fieldType {
+				t.Errorf("FieldType = %q, want %q (message: %s)", e.FieldType, tt.fieldType, e.Message)
+			}
+		})
+	}
+}
+
+// ─── Disjunction error collapsing ───────────────────────────────────────────
+
+// TestArrayEnumErrorIsSingle pins that one bad enum value inside an array
+// produces exactly one error, not one per rejected disjunct plus a summary.
+func TestArrayEnumErrorIsSingle(t *testing.T) {
+	r := MustNew(`{ items: [...{cur: "CNY" | "USD"}] }`).
+		Process(map[string]any{"items": []any{map[string]any{"cur": "XXX"}}})
+
+	if r.Valid {
+		t.Fatal("expected validation to fail")
+	}
+	if len(r.Errors) != 1 {
+		msgs := make([]string, len(r.Errors))
+		for i, e := range r.Errors {
+			msgs[i] = e.Message
+		}
+		t.Fatalf("got %d errors, want 1:\n  %s", len(r.Errors), strings.Join(msgs, "\n  "))
+	}
+
+	e := r.Errors[0]
+	if e.Path != "items[0].cur" {
+		t.Errorf("Path = %q, want %q", e.Path, "items[0].cur")
+	}
+	// CUE internals must not leak into the message.
+	for _, leak := range []string{"disjunction", "conflicting values"} {
+		if strings.Contains(e.Message, leak) {
+			t.Errorf("Message leaks CUE internals (%q): %s", leak, e.Message)
+		}
+	}
+}
+
+// ─── FriendlyMessage ────────────────────────────────────────────────────────
+
+func TestFriendlyMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		data     map[string]any
+		contains []string
+		omits    []string
+	}{
+		{
+			name:     "required missing",
+			schema:   `{ age: int }`,
+			data:     map[string]any{},
+			contains: []string{"age", "required"},
+		},
+		{
+			name:     "enum with suggestion",
+			schema:   `{ currency: "CNY" | "USD" }`,
+			data:     map[string]any{"currency": "USE"},
+			contains: []string{"currency", "USD"},
+		},
+		{
+			name:     "range",
+			schema:   `{ age: int & >=0 & <=150 }`,
+			data:     map[string]any{"age": int64(999)},
+			contains: []string{"age"},
+		},
+		{
+			name:     "type mismatch hides CUE wording",
+			schema:   `{ age: int }`,
+			data:     map[string]any{"age": "old"},
+			contains: []string{"age", "int"},
+			omits:    []string{"conflicting values", "mismatched types"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := firstError(t, tt.schema, tt.data)
+			got := e.FriendlyMessage()
+			if got == "" {
+				t.Fatal("FriendlyMessage() returned an empty string")
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("FriendlyMessage() = %q, missing %q", got, want)
+				}
+			}
+			for _, leak := range tt.omits {
+				if strings.Contains(got, leak) {
+					t.Errorf("FriendlyMessage() = %q, leaks %q", got, leak)
+				}
+			}
+		})
+	}
+}
+
+// TestFriendlyMessageNeverEmpty guarantees every error code produces something
+// renderable, so a UI can call it unconditionally.
+func TestFriendlyMessageNeverEmpty(t *testing.T) {
+	codes := []ErrorCode{
+		CodeConfigError, CodeFormatMismatch, CodeTypeMismatch, CodeEnumInvalid,
+		CodeRangeViolation, CodeRequiredMissing, CodeArrayElement, CodeCUEOther,
+		CodeBizRuleFailed, CodeExprExecError, CodeBlobTypeMismatch,
+		CodeCondRequired, CodeMetaRuntimeError,
+	}
+	for _, c := range codes {
+		e := ValidationError{Code: c, Path: "f", Message: "raw detail"}
+		if got := e.FriendlyMessage(); got == "" {
+			t.Errorf("code %s produced an empty FriendlyMessage()", c)
+		}
+	}
+}
+
+// TestErrorFormatterStillWins keeps the existing override contract: a custom
+// formatter controls Message, and FriendlyMessage must not bypass it.
+func TestErrorFormatterStillWins(t *testing.T) {
+	v := MustNew(`{ age: int }`, WithErrorFormatter(
+		func(code ErrorCode, path, detail string) string {
+			return "custom:" + string(code)
+		},
+	))
+	r := v.Process(map[string]any{})
+	if len(r.Errors) == 0 {
+		t.Fatal("expected an error")
+	}
+	if got := r.Errors[0].Message; got != "custom:"+string(CodeRequiredMissing) {
+		t.Errorf("Message = %q, want the formatter output", got)
+	}
+}

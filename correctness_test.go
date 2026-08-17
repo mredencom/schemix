@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"cuelang.org/go/cue/cuecontext"
 	"github.com/warpstreamlabs/bento/public/bloblang"
@@ -1300,5 +1301,535 @@ func TestOutputNilOnInvalid(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ─── Lazy CUE Encode ────────────────────────────────────────────────────────
+//
+// cue.Context.Encode converts the whole input map into a cue.Value and costs
+// ~1.67µs / 39 allocations. When every field is served by the Go-native fast
+// path, that value is never read, so the encode must not happen at all.
+//
+// These tests pin both halves of the contract: the encode is skipped when it is
+// provably unnecessary, and validation still agrees with CUE when it is needed.
+
+// allFastSchema has only scalar constraints, so every field gets a
+// fastConstraint and no cue.Value is ever required.
+const allFastSchema = `{
+	pan:      =~"^[0-9]{16}$"
+	amount:   int & >0
+	currency: "156" | "840"
+	age:      int & >=0 & <=150
+	active:   bool
+}`
+
+var allFastData = map[string]any{
+	"pan":      "6222021234567890",
+	"amount":   int64(10000),
+	"currency": "156",
+	"age":      int64(30),
+	"active":   true,
+}
+
+// TestLazyCUEEncode_SkippedWhenAllFieldsFastPathed asserts the encode is
+// actually skipped. cue.Context.Encode alone accounts for 39 allocations, so an
+// allocation count below that threshold is proof it never ran.
+func TestLazyCUEEncode_SkippedWhenAllFieldsFastPathed(t *testing.T) {
+	v := MustNew(allFastSchema)
+
+	// Warm up so first-call lazy initialisation is not attributed to the run.
+	if ok, errs := v.Validate(allFastData); !ok {
+		t.Fatalf("precondition failed, schema should accept data: %v", errs)
+	}
+
+	const encodeAllocs = 39 // measured cost of cue.Context.Encode alone
+	got := testing.AllocsPerRun(200, func() {
+		v.Validate(allFastData)
+	})
+
+	if got >= encodeAllocs {
+		t.Errorf("Validate allocated %.0f objects, want < %d — cue.Context.Encode "+
+			"appears to still run even though every field is fast-pathed", got, encodeAllocs)
+	}
+}
+
+// TestLazyCUEEncode_StillCorrectWhenEncodeNeeded covers the paths that DO need a
+// cue.Value: unsigned integers make the fast path return Handled=false, and
+// struct/list/@blob fields have no fast descriptor at all. Each case is compared
+// against the CUE oracle so a skipped encode can never change a verdict.
+func TestLazyCUEEncode_StillCorrectWhenEncodeNeeded(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		data   map[string]any
+	}{
+		{
+			name:   "uint falls back to CUE mid-validation",
+			schema: allFastSchema,
+			data: map[string]any{
+				"pan": "6222021234567890", "amount": uint64(10000),
+				"currency": "156", "age": int64(30), "active": true,
+			},
+		},
+		{
+			name:   "uint out of range still rejected",
+			schema: `{ age: int & >=0 & <=150 }`,
+			data:   map[string]any{"age": uint32(999)},
+		},
+		{
+			name:   "nested struct requires navigation",
+			schema: `{ user: { name: string, age: int & >0 } }`,
+			data:   map[string]any{"user": map[string]any{"name": "Alice", "age": int64(30)}},
+		},
+		{
+			name:   "nested struct invalid leaf",
+			schema: `{ user: { name: string, age: int & >0 } }`,
+			data:   map[string]any{"user": map[string]any{"name": "Alice", "age": int64(-1)}},
+		},
+		{
+			name:   "list requires unify",
+			schema: `{ items: [...{ qty: int & >0 }] }`,
+			data:   map[string]any{"items": []any{map[string]any{"qty": int64(1)}}},
+		},
+		{
+			name:   "list invalid element",
+			schema: `{ items: [...{ qty: int & >0 }] }`,
+			data:   map[string]any{"items": []any{map[string]any{"qty": int64(0)}}},
+		},
+		{
+			name:   "all-fast schema with invalid scalar",
+			schema: allFastSchema,
+			data: map[string]any{
+				"pan": "ABC", "amount": int64(-1),
+				"currency": "999", "age": int64(999), "active": true,
+			},
+		},
+		{
+			name:   "missing required field",
+			schema: allFastSchema,
+			data:   map[string]any{"pan": "6222021234567890"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MustNew(tt.schema).Process(tt.data)
+			want := processCUEOnly(t, tt.schema, tt.data)
+
+			if got.Valid != want.Valid {
+				t.Fatalf("Valid = %v, want %v (CUE oracle); got errors=%v, oracle errors=%v",
+					got.Valid, want.Valid, got.Errors, want.Errors)
+			}
+			if len(got.Errors) > 0 && len(want.Errors) > 0 {
+				if got.Errors[0].Path != want.Errors[0].Path {
+					t.Errorf("first error path = %q, want %q", got.Errors[0].Path, want.Errors[0].Path)
+				}
+			}
+		})
+	}
+}
+
+// TestLazyCUEEncode_BlobRulesUnaffected guards that @blob rules, which read the
+// raw Go map rather than a cue.Value, keep working and keep producing computed
+// output when the encode is skipped.
+func TestLazyCUEEncode_BlobRulesUnaffected(t *testing.T) {
+	v := MustNew(`{
+		amount: int & >0
+		fee:    number @blob((this.amount * 0.015).ceil())
+		ok:     bool   @blob(this.amount > 100)
+	}`)
+
+	r := v.Process(map[string]any{"amount": int64(10000)})
+	if !r.Valid {
+		t.Fatalf("Valid = false, want true; errors: %v", r.Errors)
+	}
+	if got := r.Output["fee"]; got != int64(150) {
+		t.Errorf("Output[fee] = %v (%T), want 150", got, got)
+	}
+}
+
+// ─── Attributes inside array elements ───────────────────────────────────────
+//
+// extractRules only recurses into StructKind, so @blob/@meta written inside an
+// array element schema was silently dropped: New() succeeded, the rule never
+// ran, and invalid data passed validation. Failing open is unacceptable for a
+// validator, so such schemas must be rejected at construction time with a
+// message that points at the supported form.
+
+func TestNewRejectsAttributesInsideArrayElements(t *testing.T) {
+	tests := []struct {
+		name    string
+		schema  string
+		wantErr bool
+	}{
+		// Rejected — attribute sits inside the element schema.
+		{
+			name:    "blob inside array element",
+			schema:  `{ items: [...{qty: int @blob(this.qty > 100)}] }`,
+			wantErr: true,
+		},
+		{
+			name:    "meta inside array element",
+			schema:  `{ items: [...{memo: string @meta(optional)}] }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob deeper inside array element",
+			schema:  `{ items: [...{sub: {x: int @blob(this.x > 0)}}] }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob inside array nested in a struct",
+			schema:  `{ order: {items: [...{qty: int @blob(this.qty > 0)}]} }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob inside an array nested in an array element",
+			schema:  `{ items: [...{sub: [...{x: int @blob(this.x > 0)}]}] }`,
+			wantErr: true,
+		},
+
+		// Accepted — the supported form puts the attribute on the array field.
+		{
+			name:    "blob on the array field itself",
+			schema:  `{ items: [...{qty: int}] @blob(this.items.all(i -> i.qty > 100)) }`,
+			wantErr: false,
+		},
+		{
+			name:    "meta on the array field itself",
+			schema:  `{ a: int, items?: [...int] @meta(optional, omit_empty) }`,
+			wantErr: false,
+		},
+		{
+			name:    "plain scalar array",
+			schema:  `{ items: [...int] }`,
+			wantErr: false,
+		},
+		{
+			name:    "plain struct array without attributes",
+			schema:  `{ items: [...{qty: int, name: string}] }`,
+			wantErr: false,
+		},
+		{
+			name:    "blob in a nested struct is still allowed",
+			schema:  `{ user: {age: int, adult: bool @blob(this.user.age >= 18)} }`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.schema)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("New() returned nil error; attributes inside array " +
+						"elements are silently ignored and must be rejected")
+				}
+				// The message has to name the offending path and show the fix,
+				// otherwise the user cannot act on it.
+				msg := err.Error()
+				for _, want := range []string{"items", "array element"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("error message missing %q; got: %s", want, msg)
+					}
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("New() error on a supported schema: %v", err)
+			}
+		})
+	}
+}
+
+// TestArrayFieldBlobStillWorks pins the supported form end-to-end, so the new
+// rejection cannot regress it.
+func TestArrayFieldBlobStillWorks(t *testing.T) {
+	v, err := New(`{
+		items: [...{qty: int & >=0, subtotal?: number}] @blob(
+			this.items.length() > 0,
+			this.items.map_each(this.merge({"subtotal": this.qty * 2}))
+		)
+	}`)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	r := v.Process(map[string]any{"items": []any{
+		map[string]any{"qty": int64(5)},
+	}})
+	if !r.Valid {
+		t.Fatalf("Valid = false, want true; errors: %v", r.Errors)
+	}
+
+	got, ok := r.Output["items"].([]any)
+	if !ok || len(got) != 1 {
+		t.Fatalf("Output[items] = %#v, want a 1-element slice", r.Output["items"])
+	}
+	elem, _ := got[0].(map[string]any)
+	if elem["subtotal"] != int64(10) {
+		t.Errorf("Output[items][0][subtotal] = %v (%T), want 10", elem["subtotal"], elem["subtotal"])
+	}
+
+	// Empty array must fail the length rule.
+	if r := v.Process(map[string]any{"items": []any{}}); r.Valid {
+		t.Error("empty array accepted, want rejection by the length rule")
+	}
+}
+
+// ─── Attributes on a definition ─────────────────────────────────────────────
+//
+// A definition (#Name) is a reusable template, while a @blob expression
+// references absolute paths (this.field). The two cannot be combined: the same
+// definition may be referenced by several fields, so there is no single field
+// the expression could bind to. Such attributes were silently dropped, letting
+// invalid data pass, so they must be rejected at construction time.
+
+func TestNewRejectsAttributesOnDefinitions(t *testing.T) {
+	tests := []struct {
+		name    string
+		schema  string
+		wantErr bool
+	}{
+		// Rejected — attribute sits on the definition itself.
+		{
+			name:    "blob on a scalar definition",
+			schema:  `{ #Amount: int @blob(this.amount > 100), amount: #Amount }`,
+			wantErr: true,
+		},
+		{
+			name:    "meta on a scalar definition",
+			schema:  `{ #Memo: string @meta(optional), memo: #Memo }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob on a list definition",
+			schema:  `{ #Items: [...int] @blob(this.items.length() > 0), items: #Items }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob on a struct definition",
+			schema:  `{ #U: {age: int} @blob(this.u.age > 0), u: #U }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob on an unreferenced definition",
+			schema:  `{ #Unused: int @blob(this.x > 0), plain: int }`,
+			wantErr: true,
+		},
+		{
+			name:    "blob on a definition nested in a definition",
+			schema:  `{ #Outer: { #Inner: int @blob(this.x > 0), y: int }, o: #Outer }`,
+			wantErr: true,
+		},
+
+		// Accepted — attribute is on a real field.
+		{
+			name:    "blob on the field referencing a definition",
+			schema:  `{ #PAN: =~"^[0-9]{16}$", pan: #PAN @blob(this.pan.luhn_valid()) }`,
+			wantErr: false,
+		},
+		{
+			name:    "blob on a field inside a struct definition",
+			schema:  `{ #U: { age: int @blob(this.u.age >= 18) }, u: #U }`,
+			wantErr: false,
+		},
+		{
+			name:    "plain definitions without attributes",
+			schema:  `{ #PAN: =~"^[0-9]{16}$", #Amt: int & >0, pan: #PAN, amt: #Amt }`,
+			wantErr: false,
+		},
+		{
+			name:    "struct definition referenced twice",
+			schema:  `{ #Addr: {city: string}, home: #Addr, work: #Addr }`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.schema)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("New() returned nil error; an attribute on a definition is " +
+						"silently ignored and must be rejected")
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, "definition") {
+					t.Errorf("error message should mention 'definition'; got: %s", msg)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("New() error on a supported schema: %v", err)
+			}
+		})
+	}
+}
+
+// TestDefinitionReferenceRuleWorks pins the supported rewrite end-to-end.
+func TestDefinitionReferenceRuleWorks(t *testing.T) {
+	v, err := New(`{
+		#PAN: =~"^[0-9]{16}$"
+		pan:  #PAN @blob(this.pan.luhn_valid())
+	}`)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	if r := v.Process(map[string]any{"pan": "4111111111111111"}); !r.Valid {
+		t.Errorf("valid Luhn rejected: %v", r.Errors)
+	}
+
+	r := v.Process(map[string]any{"pan": "4111111111111112"})
+	if r.Valid {
+		t.Fatal("invalid Luhn accepted")
+	}
+	if got := r.Errors[0].Path; got != "pan" {
+		t.Errorf("error path = %q, want %q", got, "pan")
+	}
+}
+
+// Schema analysis at construction time recurses through structs, array element
+// schemas and definitions. CUE permits mutually recursive definitions, so an
+// unbounded walk never terminates:
+//
+//	#A: {bs: [...#B]}
+//	#B: {as: [...#A]}
+//
+// A schema is untrusted input in any system that lets users supply it, so New()
+// must terminate on every input. It bounds the walk and reports an error rather
+// than silently skipping deeper levels, which would let a hidden @blob/@meta
+// attribute slip through unextracted.
+
+// newWithTimeout calls New in a goroutine so a hang surfaces as a test failure
+// instead of stalling the whole run.
+func newWithTimeout(t *testing.T, schema string, opts ...Option) (err error, timedOut bool) {
+	t.Helper()
+	type outcome struct {
+		err   error
+		panic any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				done <- outcome{panic: p}
+			}
+		}()
+		_, e := New(schema, opts...)
+		done <- outcome{err: e}
+	}()
+
+	select {
+	case o := <-done:
+		if o.panic != nil {
+			t.Fatalf("New() panicked (likely stack exhaustion): %v", o.panic)
+		}
+		return o.err, false
+	case <-time.After(10 * time.Second):
+		return nil, true
+	}
+}
+
+func TestNewTerminatesOnRecursiveSchemas(t *testing.T) {
+	tests := []struct {
+		name    string
+		schema  string
+		wantErr bool
+	}{
+		{
+			name:    "mutually recursive definitions through arrays",
+			schema:  `{ #A: {bs: [...#B]}, #B: {as: [...#A]}, r: #A }`,
+			wantErr: true,
+		},
+		{
+			name:    "self-referential definition through an array",
+			schema:  `{ #N: {name: string, kids: [...#N]}, r: #N }`,
+			wantErr: false, // terminates today; must keep terminating
+		},
+		{
+			name:    "self-referential definition through a struct",
+			schema:  `{ #N: {name: string, c?: #N}, r: #N }`,
+			wantErr: false,
+		},
+		{
+			name:    "mutually recursive definitions through structs",
+			schema:  `{ #A: {b?: #B}, #B: {a?: #A}, r: #A }`,
+			wantErr: false,
+		},
+		{
+			name:    "ordinary nested schema is unaffected",
+			schema:  `{ a: {b: {c: {d: int}}}, items: [...{x: int}] }`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err, timedOut := newWithTimeout(t, tt.schema)
+			if timedOut {
+				t.Fatal("New() did not terminate — schema analysis recursed without bound")
+			}
+			if tt.wantErr && err == nil {
+				t.Error("New() returned nil error; a schema exceeding the depth limit " +
+					"must be rejected rather than partially analysed")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("New() error on an acceptable schema: %v", err)
+			}
+		})
+	}
+}
+
+// TestMaxSchemaDepthIsConfigurable pins the option: a schema rejected at a low
+// limit must be accepted once the limit is raised.
+func TestMaxSchemaDepthIsConfigurable(t *testing.T) {
+	// 6 levels of nesting.
+	schema := `{ l0: { l1: { l2: { l3: { l4: { l5: int } } } } } }`
+
+	if err, timedOut := newWithTimeout(t, schema, WithMaxSchemaDepth(3)); timedOut {
+		t.Fatal("New() did not terminate")
+	} else if err == nil {
+		t.Error("New() accepted a schema deeper than the configured limit")
+	} else if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("error should mention depth; got: %v", err)
+	}
+
+	if err, timedOut := newWithTimeout(t, schema, WithMaxSchemaDepth(32)); timedOut {
+		t.Fatal("New() did not terminate")
+	} else if err != nil {
+		t.Errorf("New() rejected a schema within the configured limit: %v", err)
+	}
+}
+
+// TestMaxSchemaDepthRejectsInvalidValues keeps the option fail-closed: a
+// non-positive limit is a configuration mistake, not "unlimited".
+func TestMaxSchemaDepthRejectsInvalidValues(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		if _, err := New(`{ a: int }`, WithMaxSchemaDepth(n)); err == nil {
+			t.Errorf("WithMaxSchemaDepth(%d) accepted; want an error", n)
+		}
+	}
+}
+
+// TestDeepRecursionStillRejectsHiddenAttributes guards the reason the limit
+// reports an error instead of silently truncating: an attribute buried below the
+// limit must never be quietly dropped.
+func TestDeepRecursionStillRejectsHiddenAttributes(t *testing.T) {
+	// An @blob inside an array element, nested deeper than the limit allows.
+	schema := `{ a: { b: { c: { items: [...{qty: int @blob(this.qty > 0)}] } } } }`
+
+	err, timedOut := newWithTimeout(t, schema, WithMaxSchemaDepth(2))
+	if timedOut {
+		t.Fatal("New() did not terminate")
+	}
+	if err == nil {
+		t.Error("New() accepted a schema whose deeper levels were not analysed; " +
+			"the hidden @blob would be silently ignored")
 	}
 }

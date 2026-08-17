@@ -18,17 +18,18 @@ import (
 // cueField is a pre-compiled field descriptor extracted at schema parse time.
 // This avoids calling schema.Fields() on every Process call (optimization #3).
 type cueField struct {
-	name     string          // field name (without "?")
-	path     string          // full dot-separated path
-	schema   cue.Value       // pre-resolved schema value
-	optional bool            // whether the field is optional
-	nullable bool            // schema allows null (e.g. `null | string`)
-	hasBlob  bool            // has @blob attribute; absent input may be computed
-	isStruct bool            // IncompleteKind == StructKind
-	isList   bool            // IncompleteKind == ListKind
-	priority int             // @meta(priority=N), default 0
-	fast     *fastConstraint // Go-native fast check (nil = use CUE path)
-	children []cueField      // nested struct fields (pre-compiled recursively)
+	name      string          // field name (without "?")
+	path      string          // full dot-separated path
+	schema    cue.Value       // pre-resolved schema value
+	optional  bool            // whether the field is optional
+	nullable  bool            // schema allows null (e.g. `null | string`)
+	hasBlob   bool            // has @blob attribute; absent input may be computed
+	isStruct  bool            // IncompleteKind == StructKind
+	isList    bool            // IncompleteKind == ListKind
+	priority  int             // @meta(priority=N), default 0
+	fieldType string          // schema type name for diagnostics ("string", "int", ...)
+	fast      *fastConstraint // Go-native fast check (nil = use CUE path)
+	children  []cueField      // nested struct fields (pre-compiled recursively)
 }
 
 // Validator is a schema-driven validation and transformation engine.
@@ -267,7 +268,17 @@ func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validat
 		tracer:         buildTracer(cfg.tracerProvider),
 	}
 
-	if err := v.extractRules(schema, ""); err != nil {
+	maxDepth, err := resolveMaxSchemaDepth(cfg.maxSchemaDepth, cfg.maxSchemaDepthSet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reject attributes that would be silently dropped before compiling rules,
+	// so a schema never validates less than it appears to.
+	if err := checkDefinitionAttrs(schema, "", 0, maxDepth); err != nil {
+		return nil, err
+	}
+	if err := v.extractRules(schema, "", 0, maxDepth); err != nil {
 		return nil, err
 	}
 	sortBlobRules(v.blobRules)
@@ -293,7 +304,7 @@ func convertCUEFields(fields []cueField) []FieldInfo {
 		result[i] = FieldInfo{
 			Name:     f.name,
 			Path:     f.path,
-			Type:     cueKindToString(f.schema.IncompleteKind()),
+			Type:     f.fieldType,
 			Optional: f.optional,
 			HasBlob:  f.hasBlob,
 		}
@@ -375,6 +386,8 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			isStruct: fieldSchema.IncompleteKind() == cue.StructKind,
 			isList:   fieldSchema.IncompleteKind() == cue.ListKind,
 			priority: extractFieldPriority(fieldSchema),
+			// Resolved once here so the error path never pays for kind lookup.
+			fieldType: cueKindToString(fieldSchema.IncompleteKind()),
 		}
 
 		// Recursively compile nested struct fields
@@ -393,8 +406,59 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 	return fields
 }
 
+// checkDefinitionAttrs rejects @blob/@meta written on a definition (#Name).
+//
+// A definition is a reusable template, while a @blob expression binds to an
+// absolute path (this.field). The same definition may be referenced by several
+// fields, so there is no single field the expression could bind to — such an
+// attribute is never extracted, and silently dropping it would let invalid data
+// pass validation. Attributes on fields *inside* a struct definition are fine,
+// because a reference expands them onto real field paths.
+func checkDefinitionAttrs(val cue.Value, prefix string, depth, limit int) error {
+	if depth > limit {
+		return errSchemaTooDeep(prefix, limit)
+	}
+	if val.IncompleteKind() != cue.StructKind {
+		return nil
+	}
+	iter, err := val.Fields(cue.Attributes(true), cue.Optional(true), cue.Definitions(true))
+	if err != nil {
+		return nil
+	}
+	for iter.Next() {
+		sel := iter.Selector()
+		name := sel.String()
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		fieldValue := iter.Value()
+
+		if sel.IsDefinition() {
+			if hasSchemixAttr(fieldValue) {
+				return fmt.Errorf("definition %q: @blob/@meta is not supported on a "+
+					"definition and would be silently ignored, because a definition is a "+
+					"reusable template while the expression binds to an absolute path; "+
+					"put the attribute on the field that references it, e.g. "+
+					"field: %s @blob(this.field...)", path, name)
+			}
+		}
+
+		// Descend to find definitions declared at deeper levels.
+		if fieldValue.IncompleteKind() == cue.StructKind {
+			if err := checkDefinitionAttrs(fieldValue, path, depth+1, limit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // extractRules recursively extracts @blob and @meta rules from all struct levels.
-func (v *Validator) extractRules(val cue.Value, prefix string) error {
+func (v *Validator) extractRules(val cue.Value, prefix string, depth, limit int) error {
+	if depth > limit {
+		return errSchemaTooDeep(prefix, limit)
+	}
 	if val.IncompleteKind() != cue.StructKind {
 		return nil
 	}
@@ -456,13 +520,114 @@ func (v *Validator) extractRules(val cue.Value, prefix string) error {
 
 		// Recurse into nested structs
 		if fieldValue.IncompleteKind() == cue.StructKind {
-			if err := v.extractRules(fieldValue, fullPath); err != nil {
+			if err := v.extractRules(fieldValue, fullPath, depth+1, limit); err != nil {
 				return err
+			}
+		}
+
+		// Attributes inside an array element schema are never extracted, because
+		// rules are compiled per field path and an element index is unknown until
+		// runtime. Silently dropping them would let invalid data pass validation,
+		// so reject the schema instead and point at the supported form.
+		if fieldValue.IncompleteKind() == cue.ListKind {
+			bad, err := findAttrInListElements(fieldValue, fullPath, depth+1, limit)
+			if err != nil {
+				return err
+			}
+			if bad != "" {
+				// The suggested expression uses the full path because @blob
+				// resolves `this` against the root object, not the local struct.
+				return fmt.Errorf("field %q: @blob/@meta is not supported inside array "+
+					"elements (found at %q) and would be silently ignored; put the "+
+					"attribute on the array field itself, e.g. %s: [...{...}] "+
+					"@blob(this.%s.all(i -> i.field > 0))",
+					fullPath, bad, fieldName, fullPath)
 			}
 		}
 	}
 
 	return nil
+}
+
+// hasSchemixAttr reports whether a value carries an @blob or @meta attribute.
+func hasSchemixAttr(val cue.Value) bool {
+	if a := val.Attribute(attrBlob); a.Err() == nil {
+		return true
+	}
+	if a := val.Attribute(attrMeta); a.Err() == nil {
+		return true
+	}
+	return false
+}
+
+// findAttrInListElements returns the path of the first @blob/@meta attribute
+// found inside the element schema of a list, or "" when there is none.
+// Both list forms are covered: open lists ([...T]) expose their element schema
+// through Elem, while closed lists ([A, B]) must be iterated.
+func findAttrInListElements(list cue.Value, path string, depth, limit int) (string, error) {
+	if depth > limit {
+		return "", errSchemaTooDeep(path, limit)
+	}
+	if elem, ok := list.Elem(); ok {
+		return findAttrInElementSchema(elem, path+"[]", depth+1, limit)
+	}
+	it, err := list.List()
+	if err != nil {
+		return "", nil
+	}
+	for i := 0; it.Next(); i++ {
+		found, err := findAttrInElementSchema(it.Value(), fmt.Sprintf("%s[%d]", path, i), depth+1, limit)
+		if err != nil {
+			return "", err
+		}
+		if found != "" {
+			return found, nil
+		}
+	}
+	return "", nil
+}
+
+// findAttrInElementSchema walks an array element schema looking for @blob/@meta,
+// descending through nested structs and nested lists.
+func findAttrInElementSchema(elem cue.Value, path string, depth, limit int) (string, error) {
+	if depth > limit {
+		return "", errSchemaTooDeep(path, limit)
+	}
+	if hasSchemixAttr(elem) {
+		return path, nil
+	}
+	if elem.IncompleteKind() != cue.StructKind {
+		return "", nil
+	}
+	iter, err := elem.Fields(cue.Attributes(true), cue.Optional(true))
+	if err != nil {
+		return "", nil
+	}
+	for iter.Next() {
+		name := strings.TrimSuffix(iter.Selector().String(), "?")
+		fieldPath := path + "." + name
+		fieldValue := iter.Value()
+
+		if hasSchemixAttr(fieldValue) {
+			return fieldPath, nil
+		}
+		var found string
+		switch fieldValue.IncompleteKind() {
+		case cue.StructKind:
+			found, err = findAttrInElementSchema(fieldValue, fieldPath, depth+1, limit)
+		case cue.ListKind:
+			found, err = findAttrInListElements(fieldValue, fieldPath, depth+1, limit)
+		default:
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if found != "" {
+			return found, nil
+		}
+	}
+	return "", nil
 }
 
 // withValidationMetrics runs fn and, if a MetricsRecorder is configured,
@@ -695,7 +860,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 	if v.metrics != nil {
 		cueStart = time.Now()
 	}
-	dataValue := v.ctx.Encode(data)
+	dataValue := newLazyCUEValue(v.ctx, data)
 	v.validateCUEFields(v.cueFields, dataValue, data, &result)
 	if v.metrics != nil {
 		v.metrics.ObserveLayerDuration(LayerCUE, time.Since(cueStart), v.schemaName)
@@ -1038,12 +1203,48 @@ func (v *Validator) fieldPriorityByPath(path string) int {
 	return 0
 }
 
+// lazyCUEValue defers cue.Context.Encode until a field actually needs a
+// cue.Value. Encoding the input map costs roughly 1.67µs and 39 allocations, so
+// a schema whose every field is served by the Go-native fast path must never
+// pay for it.
+//
+// The zero value is not usable; construct with newLazyCUEValue for a root map or
+// encodedCUEValue when a cue.Value is already in hand.
+type lazyCUEValue struct {
+	ctx     *cue.Context
+	raw     map[string]any
+	val     cue.Value
+	encoded bool
+}
+
+// newLazyCUEValue wraps a raw input map, deferring the encode.
+func newLazyCUEValue(ctx *cue.Context, raw map[string]any) *lazyCUEValue {
+	return &lazyCUEValue{ctx: ctx, raw: raw}
+}
+
+// encodedCUEValue wraps a cue.Value that has already been resolved (e.g. a
+// nested field obtained via LookupPath), so no further encoding is needed.
+func encodedCUEValue(val cue.Value) *lazyCUEValue {
+	return &lazyCUEValue{val: val, encoded: true}
+}
+
+// value returns the cue.Value, encoding on first use. Subsequent calls reuse it.
+func (l *lazyCUEValue) value() cue.Value {
+	if !l.encoded {
+		l.val = l.ctx.Encode(l.raw)
+		l.encoded = true
+	}
+	return l.val
+}
+
 // validateCUEFields validates data against pre-compiled field descriptors.
 // This is significantly faster than the old validateCUERecursive because:
 //   - Optimization #1: Go map check before CUE LookupPath (fast path for missing fields)
 //   - Optimization #2: Field metadata is pre-compiled, no schema.Fields() iteration at runtime
+//   - Optimization #5: data is a lazyCUEValue, so cue.Context.Encode is skipped
+//     entirely when every field is handled by the Go-native fast path
 //   - Correctness: present @blob fields still satisfy their CUE constraints before Blob execution
-func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData map[string]any, result *Result) {
+func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, rawData map[string]any, result *Result) {
 	for i := range fields {
 		f := &fields[i]
 
@@ -1056,10 +1257,11 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 				detail := fmt.Sprintf("required field %q is missing", f.name)
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
-					Code:    CodeRequiredMissing,
-					Path:    f.path,
-					Type:    TypeCUE,
-					Message: v.formatMessage(CodeRequiredMissing, f.path, detail),
+					Code:      CodeRequiredMissing,
+					Path:      f.path,
+					Type:      TypeCUE,
+					Message:   v.formatMessage(CodeRequiredMissing, f.path, detail),
+					FieldType: f.fieldType,
 				})
 			}
 			continue
@@ -1073,10 +1275,11 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			detail := fmt.Sprintf("field %q is nil but not nullable", f.path)
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Code:    CodeRequiredMissing,
-				Path:    f.path,
-				Type:    TypeCUE,
-				Message: v.formatMessage(CodeRequiredMissing, f.path, detail),
+				Code:      CodeRequiredMissing,
+				Path:      f.path,
+				Type:      TypeCUE,
+				Message:   v.formatMessage(CodeRequiredMissing, f.path, detail),
+				FieldType: f.fieldType,
 			})
 			continue
 		}
@@ -1091,10 +1294,12 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 				if !fr.Valid {
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
-						Code:    fr.Code,
-						Path:    f.path,
-						Type:    TypeCUE,
-						Message: v.formatMessage(fr.Code, f.path, fr.Detail),
+						Code:       fr.Code,
+						Path:       f.path,
+						Type:       TypeCUE,
+						Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
+						FieldType:  f.fieldType,
+						Suggestion: fr.Suggestion,
 					})
 				}
 				continue
@@ -1102,8 +1307,9 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			// fr.Handled=false: fall through to CUE Unify
 		}
 
-		// Only now do we touch CUE for actual constraint validation
-		fieldData := data.LookupPath(cue.ParsePath(f.name))
+		// Only now do we touch CUE for actual constraint validation, which is
+		// also the point where the lazy encode is forced.
+		fieldData := data.value().LookupPath(cue.ParsePath(f.name))
 		if !fieldData.Exists() {
 			continue
 		}
@@ -1112,7 +1318,7 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 		if f.isStruct && fieldData.IncompleteKind() == cue.StructKind {
 			nestedRaw, _ := goVal.(map[string]any)
 			if nestedRaw != nil && len(f.children) > 0 {
-				v.validateCUEFields(f.children, fieldData, nestedRaw, result)
+				v.validateCUEFields(f.children, encodedCUEValue(fieldData), nestedRaw, result)
 			}
 			continue
 		}
@@ -1122,10 +1328,11 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			detail := fmt.Sprintf("field %q expects struct, got %T", f.path, goVal)
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Code:    CodeTypeMismatch,
-				Path:    f.path,
-				Type:    TypeCUE,
-				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+				Code:      CodeTypeMismatch,
+				Path:      f.path,
+				Type:      TypeCUE,
+				Message:   v.formatMessage(CodeTypeMismatch, f.path, detail),
+				FieldType: f.fieldType,
 			})
 			continue
 		}
@@ -1135,20 +1342,30 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			listUnified := f.schema.Unify(fieldData)
 			if err := listUnified.Validate(cue.Concrete(true)); err != nil {
 				cueErrs := cueerrors.Errors(err)
+				collected := make([]ValidationError, 0, len(cueErrs))
 				for _, e := range cueErrs {
 					code := classifyCUEErrorStructured(e)
 					if code == CodeCUEOther {
 						code = CodeArrayElement
 					}
 					ePath := formatCUEErrorPath(f.path, e)
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
+					collected = append(collected, ValidationError{
 						Code:    code,
 						Path:    ePath,
 						Type:    TypeCUE,
-						Message: v.formatMessage(code, ePath, e.Error()),
+						Message: e.Error(),
 					})
 				}
+				// CUE emits one error per rejected disjunct plus a summary line;
+				// collapse those into a single enum error before formatting, so
+				// the caller sees one error per offending field.
+				collected = collapseDisjunctionErrors(collected)
+				for i := range collected {
+					collected[i].Message = v.formatMessage(
+						collected[i].Code, collected[i].Path, collected[i].Message)
+				}
+				result.Valid = false
+				result.Errors = append(result.Errors, collected...)
 			}
 			continue
 		}
@@ -1158,10 +1375,11 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 			detail := fmt.Sprintf("field %q expects list, got %T", f.path, goVal)
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Code:    CodeTypeMismatch,
-				Path:    f.path,
-				Type:    TypeCUE,
-				Message: v.formatMessage(CodeTypeMismatch, f.path, detail),
+				Code:      CodeTypeMismatch,
+				Path:      f.path,
+				Type:      TypeCUE,
+				Message:   v.formatMessage(CodeTypeMismatch, f.path, detail),
+				FieldType: f.fieldType,
 			})
 			continue
 		}
@@ -1174,10 +1392,11 @@ func (v *Validator) validateCUEFields(fields []cueField, data cue.Value, rawData
 				code := classifyCUEErrorStructured(e)
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
-					Code:    code,
-					Path:    f.path,
-					Type:    TypeCUE,
-					Message: v.formatMessage(code, f.path, e.Error()),
+					Code:      code,
+					Path:      f.path,
+					Type:      TypeCUE,
+					Message:   v.formatMessage(code, f.path, e.Error()),
+					FieldType: f.fieldType,
 				})
 			}
 		}

@@ -255,7 +255,9 @@ func BenchmarkCUE_Encode(b *testing.B) {
 
 func BenchmarkCUE_ValidateFields(b *testing.B) {
 	v := MustNew(benchSchema)
-	dataValue := v.ctx.Encode(benchDataValid)
+	// Wrap outside the loop: this benchmark measures constraint checking only,
+	// not the (stack-allocated) lazy holder construction.
+	dataValue := encodedCUEValue(v.ctx.Encode(benchDataValid))
 	b.ResetTimer()
 	for b.Loop() {
 		result := &Result{Valid: true, Errors: []ValidationError{}}
