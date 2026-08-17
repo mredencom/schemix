@@ -1,6 +1,6 @@
 <div align="center">
 
-# schemix
+# Schemix
 
 **Schema-driven validation & transformation engine**
 
@@ -20,48 +20,77 @@ CUE constraints + Bloblang dynamic expressions, unified.
 ---
 
 ```mermaid
+%%{init: {'flowchart': {'wrappingWidth': 340, 'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 48}}}%%
 graph TD
-    subgraph Schema Definition
-        CUE[CUE Constraints<br/>type / regex / enum / range]
-        BLOB["@blob() Expressions<br/>validate / compute"]
-        META["@meta() Field Control<br/>priority / skip / output"]
-    end
+    SRC["<b>CUE schema text</b><br/>constraints · @blob · @meta<br/>compiled once by New()"]:::schema
 
-    subgraph Compile Time
-        CUE & BLOB & META --> FD[Pre-compiled Field Descriptors]
-        FD --> FP[Go Fast Path<br/>type / regex / range / enum]
-    end
+    SRC --> FAST["<b>fastConstraint</b><br/>scalars only"]:::fast
+    SRC --> CV["<b>CUE schema value</b><br/>structs · arrays"]:::slow
 
-    subgraph Runtime
-        FP --> ENGINE[Execution Engine]
-        ENGINE --> FA[FailAll<br/>collect all]
-        ENGINE --> FF[FailFast<br/>stop at first]
-        ENGINE --> FPR[FailPriority<br/>group isolation]
-    end
+    FAST --> L1["<b>Layer 1</b> · constraint check"]:::layer
+    CV --> L1
 
-    FA & FF & FPR --> RESULT[Result<br/>Valid · Output · Errors]
+    L1 -->|all fields scalar| Z["<b>Go fast path</b><br/>no cue.Value · 0 alloc"]:::fast
+    L1 -->|struct · array · blob| E["<b>lazy Encode</b><br/>LookupPath · Unify"]:::slow
+
+    Z --> L2["<b>Layer 2</b> · @blob + @meta<br/>on the raw Go map"]:::layer
+    E --> L2
+
+    L2 --> R["<b>Result</b><br/>Valid · Output · Errors"]:::result
+    L1 -.-> OBS(["Metrics · OTel<br/>per layer"]):::obs
+    L2 -.-> OBS
+
+    classDef schema fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef fast fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef slow fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef layer fill:#f8fafc,stroke:#475569,color:#1e293b
+    classDef result fill:#e0e7ff,stroke:#4f46e5,color:#312e5f
+    classDef obs fill:#fafafa,stroke:#a1a1aa,stroke-dasharray:3 3,color:#52525b
 ```
+
+> Green is the allocation-free path; orange is where the input must become a
+> `cue.Value`.
 
 ## Table of Contents
 
-- [Features](#features)
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [Built-in Validators](#built-in-validators)
-- [API Validation](#api-validation)
-- [Schema Syntax](#schema-syntax)
-- [Custom Functions & Methods](#custom-functions--methods)
-- [Error Handling](#error-handling)
-- [Custom Error Messages](#custom-error-messages)
-- [Schema Composition](#schema-composition)
-- [Schema Introspection](#schema-introspection)
-- [FailMode](#failmode)
-- [Error Codes](#error-codes)
-- [Bloblang Integration](#bloblang-integration)
-- [Registry Management](#registry-management)
-- [Convenience API](#convenience-api)
-- [Benchmarks](#benchmarks)
-- [License](#license)
+- [Schemix](#schemix)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Install](#install)
+  - [Quick Start](#quick-start)
+  - [Built-in Validators](#built-in-validators)
+    - [String Format](#string-format)
+    - [Character Type](#character-type)
+    - [String Checks](#string-checks)
+    - [Length \& Range](#length--range)
+    - [Financial](#financial)
+    - [Date Functions](#date-functions)
+    - [Comparison Functions](#comparison-functions)
+  - [API Validation](#api-validation)
+  - [Schema Syntax](#schema-syntax)
+    - [CUE Constraints](#cue-constraints)
+    - [@blob() — Bloblang Expressions](#blob--bloblang-expressions)
+    - [@meta() — Field Behavior Control](#meta--field-behavior-control)
+    - [Arrays](#arrays)
+  - [Custom Functions \& Methods](#custom-functions--methods)
+    - [FuncMap (Reusable Collections)](#funcmap-reusable-collections)
+    - [Overriding Built-in Validators](#overriding-built-in-validators)
+  - [Error Handling](#error-handling)
+  - [Custom Error Messages](#custom-error-messages)
+  - [Schema Composition](#schema-composition)
+  - [Schema Introspection](#schema-introspection)
+  - [FailMode](#failmode)
+  - [Error Codes](#error-codes)
+  - [Bloblang Integration](#bloblang-integration)
+  - [Registry Management](#registry-management)
+  - [Observability](#observability)
+    - [Metrics](#metrics)
+    - [Ready-made recorders](#ready-made-recorders)
+    - [Tracing](#tracing)
+  - [Convenience API](#convenience-api)
+  - [Benchmarks](#benchmarks)
+  - [Comparison](#comparison)
+  - [License](#license)
 
 ## Features
 
@@ -73,7 +102,8 @@ graph TD
 | **Custom Functions** | Register your own functions/methods with Bloblang-compatible API (V1 & V2 styles) |
 | **Field Control** | Priority groups, conditional required/skip, omit empty, fail-fast per field |
 | **Execution** | Three FailModes — collect all / stop at first / priority-group isolation |
-| **Performance** | Go-native fast path for scalar fields (2.5µs/op), pre-compiled descriptors |
+| **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations** — `cue.Context.Encode` is skipped entirely |
+| **Observability** | `MetricsRecorder` hooks + OpenTelemetry tracing; ready-made `schemixprom` / `schemixotel` recorders |
 | **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType), custom i18n formatter |
 | **Composition** | Schema reuse via CUE definitions + `NewFromValue`, runtime introspection |
 | **Integration** | Method & function forms for Benthos/Redpanda Connect pipelines |
@@ -282,6 +312,56 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 
 </details>
 
+### Arrays
+
+Element structure is expressed with CUE; cross-element rules and per-element
+computation go on the **array field itself**:
+
+```cue
+{
+    items: [...{
+        product:   =~"^.{3,50}$"
+        price:     number & >0
+        qty:       int & >=1
+        subtotal?: number              // computed — must be optional, see below
+    }] @blob(
+        this.items.length() > 0,                                        // rule
+        this.items.map_each(this.price * this.qty).sum() <= 100000,      // rule
+        this.items.map_each(this.merge({"subtotal": this.price * this.qty}))  // transform
+    )
+}
+```
+
+Comma-separated expressions are independent: those returning `bool` validate,
+and a non-bool return **replaces the array**, which is how each element gets a
+computed field.
+
+**Error paths differ by layer** — prefer CUE for anything it can express,
+because only CUE reports the element index:
+
+| Violated | Code | Path |
+|----------|------|------|
+| CUE element constraint | `E1R01` / `E1T01` / `E1F01` | `items[1].price` |
+| `@blob` rule | `E2B01` | `items` |
+
+Useful Bloblang array methods: `all(i -> …)`, `any(i -> …)`, `length()`,
+`map_each(…)`, `filter(i -> …)`, `index(n)`, `sum()`.
+
+> **`all()` returns false for an empty array** — unlike JavaScript `every()` or
+> Python `all()`. Spell out the intent: `this.items.length() > 0 && this.items.all(…)`
+> to require non-empty, or `this.items.length() == 0 || this.items.all(…)` to
+> allow empty.
+
+> **Computed element fields must be declared optional** (`subtotal?: number`).
+> CUE runs before `@blob`, so a required field that the rule is supposed to
+> produce fails with `E1M01` before the rule ever executes.
+
+> **Attributes inside an element schema are rejected.** `items: [...{qty: int @blob(…)}]`
+> makes `New()` return an error, because rules are compiled per field path and an
+> element index is unknown until runtime — the attribute would be silently
+> dropped and invalid data would pass. The error names the offending path and the
+> supported rewrite.
+
 ## Custom Functions & Methods
 
 Register custom validation logic using the same API as Bloblang — isolated per Validator:
@@ -392,9 +472,46 @@ r.HasErrorsAt("email")              // bool — field-level check
 r.ErrorMessages()                    // newline-joined string
 ```
 
+Each `ValidationError` carries:
+
+| Field | Meaning |
+|-------|---------|
+| `Code` | Stable error code (`E1E01`, `E2B01`, …) |
+| `Path` | Field path — `items[0].price`, `order.customer.age` |
+| `Type` | Layer that produced it — `cue`, `bloblang`, `meta` |
+| `FieldType` | Schema type of the field — `string`, `int`, `list`… (empty when not applicable) |
+| `Message` | Raw diagnostic: CUE/Bloblang wording, for logs |
+| `Suggestion` | Closest valid value — **enum violations only** |
+
+Enum errors name every accepted value and suggest the closest match:
+
+```go
+r := v.Process(map[string]any{"currency": "USE"}) // schema: "CNY" | "USD" | "EUR"
+
+r.Errors[0].Message           // value "USE" not in enum ["CNY", "USD", "EUR"]
+r.Errors[0].Suggestion        // USD
+r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+```
+
+> `Suggestion` is populated for enums only. A range or regex violation has no
+> meaningful value to guess, and inventing one would mislead — the bound is
+> already in the message (`value 999 out of bound <=150`).
+
 ## Custom Error Messages
 
-Provide a custom `ErrorFormatter` for i18n or user-facing messages:
+`Message` and `FriendlyMessage()` are both always available, which covers the
+two audiences without a mode switch:
+
+```go
+log.Warn(e.Message)                    // raw: age: conflicting values "old" and int
+render(e.FriendlyMessage())            // user-facing: age must be of type int
+```
+
+`FriendlyMessage()` is derived from the structured fields (`Code`, `Path`,
+`FieldType`, `Suggestion`), never returns an empty string, and keeps CUE
+internals out of user-visible text.
+
+For i18n or full control, provide an `ErrorFormatter` — it replaces `Message`:
 
 ```go
 v := schemix.MustNew(schema, schemix.WithErrorFormatter(
@@ -405,8 +522,7 @@ v := schemix.MustNew(schema, schemix.WithErrorFormatter(
 ```
 
 The formatter receives the error code, field path, and default detail message.
-Return your desired user-facing string. Default behavior (no formatter) passes
-the raw CUE/Bloblang error message through.
+With no formatter, `Message` carries the raw CUE/Bloblang text.
 
 ## Schema Composition
 
@@ -425,6 +541,31 @@ schema := ctx.CompileString(`{
 }`)
 
 v, err := schemix.NewFromValue(schema)
+```
+
+Definitions carry **constraints only** — attributes belong on the fields that
+reference them:
+
+```cue
+#PAN: =~"^[0-9]{16}$"
+
+pan: #PAN @blob(this.pan.luhn_valid())   // ✅ rule on the field → error path "pan"
+```
+
+```cue
+#PAN: =~"^[0-9]{16}$" @blob(this.pan.luhn_valid())   // ❌ New() returns an error
+```
+
+A definition is a reusable template while a `@blob` expression binds to an
+absolute path, so a definition referenced by two fields has no single path the
+expression could resolve against. Such an attribute is never extracted, so
+`New()` rejects it rather than validating less than the schema appears to.
+Attributes on fields *inside* a struct definition are fine — a reference expands
+them onto real paths:
+
+```cue
+#User: { age: int @blob(this.user.age >= 18) }   // ✅ rule path becomes "user.age"
+user: #User
 ```
 
 ## Schema Introspection
@@ -531,6 +672,73 @@ reg.RegisterMethods()              // method form only: this.validate_schema(...
 reg.RegisterFunctions()            // function form only: validate_schema(data: ...) / process_schema(data: ...)
 ```
 
+## Observability
+
+Metrics and tracing are opt-in. When neither is configured, every related code
+path is skipped — `Process` and `Validate` incur zero overhead.
+
+### Metrics
+
+Implement `MetricsRecorder` and attach it with `WithMetricsRecorder`; `WithName`
+labels metrics per schema:
+
+```go
+v, _ := schemix.New(schema,
+    schemix.WithName("payment"),
+    schemix.WithMetricsRecorder(rec),
+)
+```
+
+| Method | Called |
+|--------|--------|
+| `ObserveValidation(d, valid, schemaName)` | once per `Process` / `Validate` |
+| `ObserveLayerDuration(layer, d, schemaName)` | once per layer — `cue`, `blob` |
+| `ObserveErrorCode(code, schemaName)` | once per validation error |
+| `ObserveBlobExecution(path, d, success)` | once per `@blob` rule execution |
+| `ObserveFastpathDecision(path, hit)` | once per field holding a fast constraint |
+
+> Implementations must be concurrency-safe and non-blocking — they run inline on
+> every call. Buffer and batch asynchronously rather than doing network I/O.
+
+### Ready-made recorders
+
+Both live in their own module, so they add no dependencies to schemix itself:
+
+```bash
+go get github.com/mredencom/schemix/schemixprom   # Prometheus
+go get github.com/mredencom/schemix/schemixotel   # OpenTelemetry metrics
+```
+
+```go
+// Prometheus
+rec, err := schemixprom.New(prometheus.DefaultRegisterer,
+    schemixprom.WithNamespace("myapp"))
+
+// OpenTelemetry
+rec, err := schemixotel.New(otel.GetMeterProvider())
+```
+
+`schemixprom` registers `{namespace}_schemix_*`: `validation_duration_seconds`,
+`validations_total`, `errors_total`, `blob_duration_seconds`,
+`blob_executions_total`, `layer_duration_seconds`, `fastpath_decisions_total`.
+`schemixotel` emits the same set as `schemix.validation.duration` /
+`.total`, `schemix.layer.duration`, `schemix.blob.duration` / `.total`,
+`schemix.error.total`, `schemix.fastpath.total`.
+
+### Tracing
+
+Spans are created only on the context-aware methods:
+
+```go
+v, _ := schemix.New(schema, schemix.WithTracerProvider(otel.GetTracerProvider()))
+
+r := v.ProcessContext(ctx, data) // root span + schemix.cue / schemix.blob children
+```
+
+The root span carries `schemix.schema_name`, `schemix.fail_mode`,
+`schemix.valid`, `schemix.error_count` and `schemix.field_count`, and records a
+`validation_error` event per error (capped at 20 per span).
+
 ## Convenience API
 
 ```go
@@ -546,6 +754,7 @@ schemix.WithFunctionV2(name, spec, ctor)         // custom function (V2)
 schemix.WithMethod(name, fn)                     // custom method (V1)
 schemix.WithMethodV2(name, spec, ctor)           // custom method (V2)
 schemix.WithFuncMap(funcs)                       // inject reusable FuncMap
+schemix.WithMaxSchemaDepth(32)                   // bound construction-time schema recursion
 
 // Options — override built-in validators
 schemix.WithOverrideMethod(names...)             // allow overriding specific built-in methods
@@ -573,24 +782,85 @@ fields := v.Fields()                             // []FieldInfo
 
 ## Benchmarks
 
-Apple M4, Go 1.26.5 — 6 fields (3 CUE + 3 @blob):
+Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 441 µs | 791 KiB | 22275 |
-| `Process` (valid) | **7.07 µs** | 15.04 KiB | 125 |
-| `Process` (invalid) | 7.67 µs | 15.91 KiB | 141 |
-| `Process` (nested) | 30.24 µs | 45.43 KiB | 491 |
-| `Validate` (no output) | **6.48 µs** | 14.68 KiB | 121 |
-| `Process` (parallel, 10 cores) | **4.73 µs** | 15.04 KiB | 125 |
-| `ValidateFields` (fast path) | 146.8 ns | 0 B | 0 |
-| `Registry.Get` | 6.05 ns | 0 B | 0 |
+| `New` (compile) | 430 µs | 796 KiB | 22366 |
+| `Process` (valid) | **4.67 µs** | 11.90 KiB | 86 |
+| `Process` (invalid) | 5.59 µs | 13.14 KiB | 102 |
+| `Process` (nested) | 37.35 µs | 45.86 KiB | 492 |
+| `Validate` (no output) | **4.82 µs** | 11.54 KiB | 82 |
+| `Process` (parallel, 10 cores) | **4.20 µs** | 11.90 KiB | 86 |
+| `ValidateFields` (fast path) | 146.5 ns | 0 B | 0 |
+| `Registry.Get` | 6.25 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **175x speedup** over the CUE legacy path (146.8ns vs 25.62µs).
+> achieving about **175x speedup** over the CUE legacy path (146.5ns vs 25.62µs).
+>
+> `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
+> fast path never converts the input into a `cue.Value` at all. That is exactly
+> the 39 allocations missing from every row above compared to earlier releases
+> (`Process` 125 → 86, `Validate` 121 → 82). Nested and array schemas still
+> require the encode, which is why `Process (nested)` is unchanged at 492.
 >
 > Pull requests also run base and head benchmarks on the same CI runner. A statistically
 > significant regression above 5% fails the benchmark gate.
+
+## Comparison
+
+All engines validate the **same five constraints** (`pan` 16 digits, `amount`
+int > 0, `currency` enum, `age` 0..150, `email` format), each in that library's
+idiomatic best form. An [equivalence test](benchmarks/comparison/comparison_test.go)
+asserts all six reach the identical verdict before any number is published.
+
+Apple M4, Go 1.25.11, `benchstat` medians. Time / allocations per operation:
+
+| Scenario | **schemix** | go-playground/validator | ozzo-validation | jsonschema v6 | raw CUE API |
+|----------|-------------|-------------------------|-----------------|---------------|-------------|
+| Scalar, valid | **382 ns · 0** | 784 ns · 6 | 1.72 µs · 37 | 1.87 µs · 56 | 12.86 µs · 186 |
+| Scalar, invalid | **1.06 µs · 15** | 733 ns · 25 | 2.05 µs · 49 | 2.13 µs · 81 | 16.30 µs · 301 |
+| Parallel, 10 cores | **~100 ns · 0** | 247 ns · 6 | — | 785 ns · 56 | — |
+| JSON bytes, end-to-end | 1.69 µs · 31 | 1.50 µs · 14 | 2.52 µs · 45 | 2.82 µs · 80 | — |
+| Nested + 3-item array | 27.35 µs · 432 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
+| With one `@blob()` rule | 6.44 µs · 127 | not supported | not supported | not supported | — |
+| Compile (once at startup) | 43.97 µs | 10.11 µs | — | 65.97 µs | — |
+
+Capabilities, where the difference is structural rather than a matter of
+nanoseconds:
+
+| | **schemix** | validator | ozzo | JSON Schema |
+|---|---|---|---|---|
+| Schema is hot-loadable text, not compiled Go | ✅ | ❌ | ❌ | ✅ |
+| Computed / derived output fields | ✅ | ❌ | ❌ | ❌ |
+| Dynamic expression language | ✅ Bloblang | ⚠️ fixed tags | ✅ Go | ⚠️ `if`/`then` |
+| Stable structured error codes | ✅ | ❌ | ❌ | ❌ |
+| Priority-grouped failure isolation | ✅ | ❌ | ❌ | ❌ |
+| Metrics + OTel tracing hooks | ✅ | ❌ | ❌ | ❌ |
+| Cross-language portability | ❌ | ❌ | ❌ | ✅ |
+
+**Scalar-only schemas validate allocation-free** — 2.1x faster than struct-tag
+reflection and 34x faster than driving CUE directly, because `cue.Context.Encode`
+is skipped entirely when every field is served by the Go-native fast path.
+
+Two honest boundaries on that headline:
+
+- Add **one `@blob()` rule, a nested struct, or an array** and the input must be
+  encoded into a `cue.Value` — cost jumps by an order of magnitude.
+- **Arrays are the weak spot**: the fast path has no list descriptor, so the whole
+  list goes to `cue.Value.Unify` at ~6.3 µs per element. Validating large
+  collections element-by-element against a per-element `Validator` is
+  [measured 62-82x faster](benchmarks/comparison/README.md#mitigation).
+
+What schemix offers that raw throughput does not cover: the schema is
+hot-loadable text rather than compiled Go, plus computed fields (`@blob()`),
+dynamic expressions, structured error codes, priority-grouped failure isolation,
+metrics/OTel hooks, and a Benthos pipeline plugin. If you need none of those and
+the shape is a compile-time Go struct, go-playground/validator is the leaner
+choice; if the schema must be portable across languages, use JSON Schema.
+
+Full per-scenario tables, the array breakdown, and reproduction steps:
+[benchmarks/comparison](benchmarks/comparison/README.md).
 
 ## License
 

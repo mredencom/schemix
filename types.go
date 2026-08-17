@@ -16,6 +16,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// defaultMaxSchemaDepth bounds construction-time schema analysis when the caller
+// does not configure a limit.
+//
+// CUE permits mutually recursive definitions, which expand without end:
+//
+//	#A: {bs: [...#B]}
+//	#B: {as: [...#A]}
+//
+// Since a schema is untrusted input wherever users can supply it, every
+// recursive walk performed by New() carries this bound.
+const defaultMaxSchemaDepth = 32
+
 // ErrorCode is a structured error identifier with format E{layer}{category}{seq}.
 //
 //	Layer 1: CUE structural/type validation
@@ -48,16 +60,126 @@ const (
 
 // ValidationError represents a single validation failure.
 type ValidationError struct {
-	Code    ErrorCode `json:"code"`    // structured error code
-	Path    string    `json:"path"`    // field path (e.g. "merchant.country")
-	Type    string    `json:"type"`    // "cue", "bloblang", or "meta"
-	Message string    `json:"message"` // human-readable description
+	Code ErrorCode `json:"code"` // structured error code
+	Path string    `json:"path"` // field path (e.g. "merchant.country")
+	Type string    `json:"type"` // "cue", "bloblang", or "meta"
+
+	// FieldType is the schema type of the offending field — "string", "int",
+	// "float", "number", "bool", "struct" or "list". Empty when the error is not
+	// tied to a declared field (e.g. a configuration error).
+	FieldType string `json:"field_type,omitempty"`
+
+	// Message is the raw diagnostic: the CUE/Bloblang wording, or the output of
+	// a custom ErrorFormatter when one is configured. Use it for logs and
+	// debugging; use FriendlyMessage for user-facing text.
+	Message string `json:"message"`
+
+	// Suggestion names the closest valid value when one can be determined with
+	// confidence. Only enum violations populate it — a range or regex violation
+	// has no meaningful correction to guess, and inventing one would mislead.
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // Error implements the error interface for ValidationError.
 func (e ValidationError) Error() string {
 	return fmt.Sprintf("[%s] %s: %s", e.Code, e.Path, e.Message)
 }
+
+// FriendlyMessage renders a user-facing sentence for the error.
+//
+// Message and FriendlyMessage are both always available, which is deliberate:
+// a service typically logs the raw diagnostic and renders the friendly one, and
+// needing both at once is the common case rather than a mode to switch between.
+//
+//	log.Warn(e.Message)              // raw CUE/Bloblang wording
+//	json.Encode(e.FriendlyMessage()) // user-facing text
+//
+// A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
+// from the structured fields (Code, Path, FieldType, Suggestion) and therefore
+// stays stable regardless of formatter configuration.
+func (e ValidationError) FriendlyMessage() string {
+	field := e.Path
+	if field == "" {
+		field = "value"
+	}
+
+	switch e.Code {
+	case CodeRequiredMissing:
+		return fmt.Sprintf("%s is required", field)
+
+	case CodeCondRequired:
+		return fmt.Sprintf("%s is required for this request", field)
+
+	case CodeTypeMismatch:
+		if e.FieldType != "" {
+			return fmt.Sprintf("%s must be of type %s", field, e.FieldType)
+		}
+		return fmt.Sprintf("%s has the wrong type", field)
+
+	case CodeEnumInvalid:
+		msg := fmt.Sprintf("%s is not one of the allowed values", field)
+		if opts := enumOptionsFromDetail(e.Message); opts != "" {
+			msg = fmt.Sprintf("%s must be one of %s", field, opts)
+		}
+		if e.Suggestion != "" {
+			msg += fmt.Sprintf(" — did you mean %q?", e.Suggestion)
+		}
+		return msg
+
+	case CodeRangeViolation:
+		if bound := boundFromDetail(e.Message); bound != "" {
+			return fmt.Sprintf("%s must be %s", field, bound)
+		}
+		return fmt.Sprintf("%s is out of the allowed range", field)
+
+	case CodeFormatMismatch:
+		return fmt.Sprintf("%s has an invalid format", field)
+
+	case CodeArrayElement:
+		return fmt.Sprintf("%s contains an invalid item", field)
+
+	case CodeBizRuleFailed:
+		return fmt.Sprintf("%s does not satisfy a validation rule", field)
+
+	case CodeBlobTypeMismatch:
+		return fmt.Sprintf("%s produced a value of the wrong type", field)
+
+	case CodeExprExecError, CodeMetaRuntimeError:
+		return fmt.Sprintf("%s could not be evaluated", field)
+
+	case CodeConfigError:
+		return "the validation configuration is invalid"
+
+	case CodeCUEOther:
+		return fmt.Sprintf("%s is invalid", field)
+	}
+
+	// Unknown code — never return empty, so a UI can call this unconditionally.
+	return fmt.Sprintf("%s is invalid", field)
+}
+
+// enumOptionsFromDetail lifts the candidate list out of an enum detail such as
+// `value "USE" not in enum ["CNY", "USD"]`, returning `["CNY", "USD"]`.
+func enumOptionsFromDetail(detail string) string {
+	open := strings.LastIndex(detail, "[")
+	if open < 0 || !strings.HasSuffix(detail, "]") {
+		return ""
+	}
+	return detail[open:]
+}
+
+// boundFromDetail lifts the comparison out of a range detail such as
+// `value 999 out of bound <=150`, returning `<=150`.
+func boundFromDetail(detail string) string {
+	const marker = "out of bound "
+	i := strings.Index(detail, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(detail[i+len(marker):])
+}
+
+// maxSuggestionDistance caps how far a value may be from a candidate before the
 
 // FailMode controls how errors are collected during validation.
 type FailMode int
@@ -192,6 +314,8 @@ type validatorConfig struct {
 	metricsRecorder      MetricsRecorder      // optional observability hook (nil = zero overhead)
 	schemaName           string               // optional name for observability labels
 	tracerProvider       trace.TracerProvider // optional OTel tracer provider (nil = no tracing)
+	maxSchemaDepth       int                  // bound on construction-time schema recursion
+	maxSchemaDepthSet    bool                 // distinguishes an explicit 0 from an unset limit
 }
 
 // customFuncEntry stores one custom function/method registration.
@@ -383,6 +507,46 @@ func WithMethodV2(name string, spec *bloblang.PluginSpec, ctor bloblang.MethodCo
 			methodV2: ctor,
 		})
 	}
+}
+
+// WithMaxSchemaDepth bounds how deep New() recurses while analysing the schema
+// (nested structs, array element schemas and definitions).
+//
+// Exceeding the limit makes New() return an error rather than silently skipping
+// the deeper levels: a skipped level could hide an @blob/@meta attribute that
+// would then never be extracted, and a validator that quietly checks less than
+// its schema declares is worse than one that refuses to build.
+//
+// n must be positive. The default is 32, which is far beyond any hand-written
+// schema; raise it only for generated schemas with genuinely deep nesting.
+func WithMaxSchemaDepth(n int) Option {
+	return func(cfg *validatorConfig) {
+		cfg.maxSchemaDepth = n
+		cfg.maxSchemaDepthSet = true
+	}
+}
+
+// resolveMaxSchemaDepth validates the configured limit, applying the default
+// when the option was never set. A non-positive value is a configuration mistake
+// rather than a request for unlimited recursion, so it is rejected — silently
+// treating 0 as "unlimited" would reintroduce the non-termination this bound
+// exists to prevent.
+func resolveMaxSchemaDepth(configured int, set bool) (int, error) {
+	if !set {
+		return defaultMaxSchemaDepth, nil
+	}
+	if configured < 1 {
+		return 0, fmt.Errorf("WithMaxSchemaDepth: depth must be positive, got %d", configured)
+	}
+	return configured, nil
+}
+
+// errSchemaTooDeep reports that analysis hit the configured bound.
+func errSchemaTooDeep(path string, limit int) error {
+	return fmt.Errorf("schema nesting at %q exceeds the maximum depth of %d; "+
+		"raise it with WithMaxSchemaDepth if the schema is legitimately this deep, "+
+		"or check for mutually recursive definitions such as "+
+		"#A: {bs: [...#B]} with #B: {as: [...#A]}", path, limit)
 }
 
 // FuncMap is a reusable collection of custom functions and methods that can be
