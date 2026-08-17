@@ -568,7 +568,9 @@ func findAttrInListElements(list cue.Value, path string, depth, limit int) (stri
 	if depth > limit {
 		return "", errSchemaTooDeep(path, limit)
 	}
-	if elem, ok := list.Elem(); ok {
+	// An open list ([...T]) exposes its element schema at any index; a closed
+	// list ([A, B]) has none and must be iterated instead.
+	if elem := list.LookupPath(cue.MakePath(cue.AnyIndex)); elem.Exists() {
 		return findAttrInElementSchema(elem, path+"[]", depth+1, limit)
 	}
 	it, err := list.List()
