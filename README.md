@@ -286,7 +286,7 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 |-----------|------|---------|
 | `priority=N` | int | Execution priority (lower = earlier) |
 | `optional` | flag | No error if field missing |
-| `conditional` | flag | Conditionally optional (with required_if) |
+| `conditional` | flag | Alias for `optional`; documents intent when paired with `required_if` |
 | `skip_empty` | flag | Skip validation when empty |
 | `fail_fast` | flag | Skip remaining rules on failure |
 | `omit_if_skip` | flag | Remove from Output when skipped |
@@ -300,7 +300,7 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 ```cue
 {
     payment_type: "credit" | "debit"
-    cvv: string @meta(conditional, required_if=this.payment_type == "credit")
+    cvv?: string @meta(conditional, required_if=this.payment_type == "credit")
 
     pan: =~"^[0-9]{16}$" @meta(priority=1)
     luhn_check: bool @blob(this.pan.luhn_valid()) @meta(priority=2)
@@ -309,6 +309,20 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
     fee?: number @meta(optional, skip_if=this.payment_type == "debit", omit_if_skip)
 }
 ```
+
+> **`@meta(optional)` and `@meta(conditional)` also relax the CUE layer.** A field
+> carrying either flag is treated as absent-tolerant even when the CUE syntax
+> declares it required, so `cvv: string @meta(conditional, …)` and
+> `cvv?: string @meta(conditional, …)` behave identically: no `E1M01` is raised,
+> `required_if` gets to run, and a missing `cvv` on a credit payment reports
+> `E3C01`. Writing the `?` is preferred for clarity — it keeps the CUE layer and
+> the `@meta` layer stating the same thing — but it is not required for
+> correctness.
+
+> `conditional` and `optional` are currently interchangeable — `conditional`
+> implies `optional` and no other behavior distinguishes them. Prefer
+> `conditional` when the field's presence is governed by `required_if`, as
+> documentation of intent.
 
 </details>
 

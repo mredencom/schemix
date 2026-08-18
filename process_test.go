@@ -151,6 +151,72 @@ func TestConditionalFailFast(t *testing.T) {
 	}
 }
 
+// TestMetaOptionalOverridesCUERequiredness pins a non-obvious compile-time
+// behavior: @meta(optional) and @meta(conditional) mark the field
+// absent-tolerant at the CUE layer too, even when the CUE syntax declares it
+// required (no `?`). compileCUEFields scans the @meta attribute and sets
+// cueField.optional accordingly.
+//
+// The consequence is that `cvv: string @meta(conditional, required_if=…)` and
+// `cvv?: string @meta(conditional, required_if=…)` behave identically: CUE does
+// not report E1M01, so required_if runs and reports E3C01. Writing the `?` is
+// preferred for clarity, not required for correctness.
+func TestMetaOptionalOverridesCUERequiredness(t *testing.T) {
+	data := map[string]any{"payment_type": "credit"} // cvv absent
+
+	schemas := map[string]string{
+		"cue-required + @meta(conditional)": `{
+			payment_type: "credit" | "debit"
+			cvv: string @meta(conditional, required_if=this.payment_type == "credit")
+		}`,
+		"cue-optional + @meta(conditional)": `{
+			payment_type: "credit" | "debit"
+			cvv?: string @meta(conditional, required_if=this.payment_type == "credit")
+		}`,
+		"cue-required + @meta(optional)": `{
+			payment_type: "credit" | "debit"
+			cvv: string @meta(optional, required_if=this.payment_type == "credit")
+		}`,
+	}
+
+	for name, src := range schemas {
+		t.Run(name, func(t *testing.T) {
+			r := MustNew(src).ProcessWithMode(data, FailAll)
+
+			if r.Valid {
+				t.Fatal("expected invalid")
+			}
+			if !r.HasCode(CodeCondRequired) {
+				t.Errorf("want %s from required_if, got %v", CodeCondRequired, r.Errors)
+			}
+			// The point of the test: the CUE layer must NOT have short-circuited
+			// with a required-missing error, or required_if would never run.
+			if r.HasCode(CodeRequiredMissing) {
+				t.Errorf("did not expect %s: @meta(optional|conditional) should make "+
+					"the field absent-tolerant at the CUE layer; got %v",
+					CodeRequiredMissing, r.Errors)
+			}
+			if len(r.Errors) != 1 {
+				t.Errorf("want exactly 1 error, got %d: %v", len(r.Errors), r.Errors)
+			}
+		})
+	}
+}
+
+// A field with no @meta escape hatch still reports E1M01 when missing, which is
+// the contrast that makes the override above meaningful.
+func TestPlainRequiredFieldReportsMissing(t *testing.T) {
+	v := MustNew(`{
+		payment_type: "credit" | "debit"
+		cvv: string
+	}`)
+
+	r := v.ProcessWithMode(map[string]any{"payment_type": "credit"}, FailAll)
+	if !r.HasCode(CodeRequiredMissing) {
+		t.Errorf("want %s, got %v", CodeRequiredMissing, r.Errors)
+	}
+}
+
 // TestConditionalOmitEmpty pins the `meta.OmitEmpty && result.Output != nil`
 // delete inside the optional branch, also previously uncovered.
 func TestConditionalOmitEmpty(t *testing.T) {

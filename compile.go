@@ -404,7 +404,7 @@ type blobRule struct {
 type fieldMeta struct {
 	Priority       int                // execution priority (lower = first)
 	Optional       bool               // field absence is not an error
-	Conditional    bool               // set by @meta(conditional); currently never read — see note below
+	Conditional    bool               // @meta(conditional) was present; recorded but not read, see parsefieldMeta
 	SkipEmpty      bool               // skip validation when empty/zero
 	FailFast       bool               // skip remaining rules for this field on failure
 	OmitIfSkip     bool               // remove from output when skipped
@@ -518,9 +518,16 @@ func parsefieldMeta(val cue.Value, parse blobParser) (fieldMeta, error) {
 		case key == metaConditional:
 			// conditional implies optional, which makes it behave exactly like
 			// @meta(optional) at execution time: processInternal's optional
-			// branch handles the required_if check for both. Conditional is
-			// recorded but never read — it exists so that a future release can
-			// give it distinct semantics without a schema syntax change.
+			// branch performs the required_if check for both, and no code reads
+			// meta.Conditional.
+			//
+			// The field is kept deliberately rather than dropped: it records
+			// the author's intent at the schema level, so a future release can
+			// give conditional its own semantics (for example, requiring the
+			// field to be absent unless required_if holds) without changing the
+			// schema syntax. Anything that starts reading it must first decide
+			// what conditional means on its own, and must run before the
+			// optional branch to be reachable at all.
 			meta.Conditional = true
 			meta.Optional = true
 		case key == metaSkipEmpty:
