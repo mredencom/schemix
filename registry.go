@@ -340,3 +340,30 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 func (r *Registry) RegisterAll() error {
 	return r.RegisterAllTo(globalBloblangEnvironment)
 }
+
+// Plugin names registered with Bloblang.
+const (
+	pluginValidateSchema = "validate_schema"
+	pluginProcessSchema  = "process_schema"
+)
+
+// Plugin spec metadata.
+const categoryValidation = "Validation"
+
+// Parameter names used in Bloblang plugin specs.
+const (
+	paramName = "name"
+	paramMode = "mode"
+	paramData = "data"
+)
+
+// Result map keys returned by validate_schema / process_schema.
+const (
+	keyValid   = "valid"
+	keyErrors  = "errors"
+	keyOutput  = "output"
+	keyCode    = "code"
+	keyPath    = "path"
+	keyType    = "type"
+	keyMessage = "message"
+)

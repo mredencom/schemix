@@ -1,10 +1,14 @@
 package schemix
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 
 	"cuelang.org/go/cue"
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // cueField is a pre-compiled field descriptor extracted at schema parse time.
@@ -368,3 +372,94 @@ func findAttrInElementSchema(elem cue.Value, path string, depth, limit int) (str
 	}
 	return "", nil
 }
+
+// errSchemaTooDeep reports that analysis hit the configured bound.
+func errSchemaTooDeep(path string, limit int) error {
+	return fmt.Errorf("schema nesting at %q exceeds the maximum depth of %d; "+
+		"raise it with WithMaxSchemaDepth if the schema is legitimately this deep, "+
+		"or check for mutually recursive definitions such as "+
+		"#A: {bs: [...#B]} with #B: {as: [...#A]}", path, limit)
+}
+
+// FieldInfo describes a field in the schema. Returned by Validator.Fields().
+// This is useful for generating documentation, API specs, or UI forms.
+type FieldInfo struct {
+	Name     string      `json:"name"`               // field name
+	Path     string      `json:"path"`               // full dot-path
+	Type     string      `json:"type"`               // "string", "int", "float", "bool", "struct", "list", "number", "unknown"
+	Optional bool        `json:"optional"`           // whether the field is optional
+	HasBlob  bool        `json:"has_blob"`           // has @blob() annotation
+	Children []FieldInfo `json:"children,omitempty"` // nested struct fields
+}
+
+// blobRule is an extracted @blob rule with its field path and meta controls.
+type blobRule struct {
+	Path string             // field path (e.g. "address.city")
+	Exec *bloblang.Executor // compiled Bloblang expression (nil = pure meta node)
+	Expr string             // raw expression text
+	Meta fieldMeta          // field behavior controls
+}
+
+// fieldMeta holds all @meta() attribute parameters for a field.
+type fieldMeta struct {
+	Priority       int                // execution priority (lower = first)
+	Optional       bool               // field absence is not an error
+	Conditional    bool               // conditional optional (with required_if)
+	SkipEmpty      bool               // skip validation when empty/zero
+	FailFast       bool               // skip remaining rules for this field on failure
+	OmitIfSkip     bool               // remove from output when skipped
+	OmitEmpty      bool               // remove from output when empty
+	SkipIf         *bloblang.Executor // conditional skip expression
+	SkipIfExpr     string
+	RequiredIf     *bloblang.Executor // conditional required expression
+	RequiredIfExpr string
+}
+
+// sortBlobRules sorts rules by priority (stable), overflow-safe via cmp.Compare.
+func sortBlobRules(rules []blobRule) {
+	slices.SortStableFunc(rules, func(a, b blobRule) int {
+		return cmp.Compare(a.Meta.Priority, b.Meta.Priority)
+	})
+}
+
+// extractFieldPriority reads the @meta(priority=N) value from a CUE field value.
+// Returns 0 (default priority) if no priority is specified or if parsing fails.
+func extractFieldPriority(fieldSchema cue.Value) int {
+	metaAttr := fieldSchema.Attribute(attrMeta)
+	if metaAttr.Err() != nil {
+		return 0
+	}
+	for i := range metaAttr.NumArgs() {
+		key, val := metaAttr.Arg(i)
+		key = strings.TrimSpace(key)
+		if key == metaPriority && val != "" {
+			p, err := strconv.Atoi(val)
+			if err == nil {
+				return p
+			}
+		}
+	}
+	return 0
+}
+
+// Meta attribute keys parsed from @meta(...).
+const (
+	metaPriority    = "priority"
+	metaOptional    = "optional"
+	metaConditional = "conditional"
+	metaSkipEmpty   = "skip_empty"
+	metaFailFast    = "fail_fast"
+	metaOmitIfSkip  = "omit_if_skip"
+	metaOmitEmpty   = "omit_empty"
+	metaRequiredIf  = "required_if"
+	metaSkipIf      = "skip_if"
+)
+
+// Bloblang mapping template for compiling expressions.
+const blobMappingTemplate = "root = %s"
+
+// CUE attribute names used in schema parsing.
+const (
+	attrBlob = "blob"
+	attrMeta = "meta"
+)

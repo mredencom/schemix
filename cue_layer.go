@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -290,3 +291,32 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 }
 
 // ─── Global Validator Store ──────────────────────────────────────────────────
+
+// formatCUEErrorPath formats a structured CUE error path using Go-style array indices.
+func formatCUEErrorPath(parent string, err error) string {
+	segments := cueerrors.Path(err)
+	if len(segments) == 0 {
+		return parent
+	}
+
+	var path strings.Builder
+	for _, segment := range segments {
+		if _, parseErr := strconv.ParseUint(segment, 10, 64); parseErr == nil {
+			path.WriteByte('[')
+			path.WriteString(segment)
+			path.WriteByte(']')
+			continue
+		}
+		if path.Len() > 0 {
+			path.WriteByte('.')
+		}
+		path.WriteString(segment)
+	}
+
+	formatted := path.String()
+	if parent == "" || formatted == parent || strings.HasPrefix(formatted, parent+".") ||
+		strings.HasPrefix(formatted, parent+"[") {
+		return formatted
+	}
+	return parent + "." + formatted
+}
