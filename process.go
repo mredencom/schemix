@@ -164,47 +164,18 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 		}
 
 		// optional + required_if
+		//
+		// This branch also handles @meta(conditional): parsefieldMeta sets
+		// Optional = true whenever the conditional flag is present, so a
+		// conditional field always satisfies the test below and always
+		// continues. A separate `meta.Conditional && fieldVal == nil` branch
+		// after this one is therefore unreachable — it existed as a duplicate
+		// of this block until it was removed. Do not reintroduce it; give
+		// Conditional its own non-optional semantics in parsefieldMeta first.
 		if meta.Optional && fieldVal == nil {
 			if meta.OmitEmpty && result.Output != nil {
 				deleteNestedKey(result.Output, rule.Path)
 			}
-			if meta.RequiredIf != nil {
-				res, err := meta.RequiredIf.Query(data)
-				if err != nil {
-					detail := fmt.Sprintf("required_if expression error (%s): %v", meta.RequiredIfExpr, err)
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:    CodeMetaRuntimeError,
-						Path:    rule.Path,
-						Type:    TypeMeta,
-						Message: v.formatMessage(CodeMetaRuntimeError, rule.Path, detail),
-					})
-					failedPaths[rule.Path] = true
-					priorityHasError = true
-					if mode == FailFast {
-						return result
-					}
-				} else if required, ok := res.(bool); ok && required {
-					detail := fmt.Sprintf("conditional required (%s)", meta.RequiredIfExpr)
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:    CodeCondRequired,
-						Path:    rule.Path,
-						Type:    TypeMeta,
-						Message: v.formatMessage(CodeCondRequired, rule.Path, detail),
-					})
-					failedPaths[rule.Path] = true
-					priorityHasError = true
-					if mode == FailFast {
-						return result
-					}
-				}
-			}
-			continue
-		}
-
-		// conditional + required_if
-		if meta.Conditional && fieldVal == nil {
 			if meta.RequiredIf != nil {
 				res, err := meta.RequiredIf.Query(data)
 				if err != nil {
