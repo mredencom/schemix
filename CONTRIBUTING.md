@@ -24,8 +24,8 @@ go test -cover ./...
 # Run benchmarks
 go test -bench=. -benchmem ./...
 
-# Run examples
-cd example && go run .
+# Run the documentation examples and verify their output
+go test -run '^Example' .
 ```
 
 ## Code Style
@@ -47,6 +47,13 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/):
 - `docs:` documentation only
 - `test:` adding or updating tests
 - `chore:` maintenance tasks
+
+**Write commit messages in English**, subject and body alike.
+
+Keep the subject under 72 characters and in the imperative mood. Use the body
+to record why the change was made and how it was verified — a reader six months
+from now benefits far more from the reasoning and the evidence than from a
+restatement of the diff.
 
 ## Reporting Issues
 
