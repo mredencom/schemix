@@ -285,7 +285,7 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 |------|------|------|
 | `priority=N` | int | 执行优先级（数字小优先） |
 | `optional` | flag | 字段缺失不报错 |
-| `conditional` | flag | 条件可选（配合 required_if） |
+| `conditional` | flag | `optional` 的别名；配合 `required_if` 时用于表达意图 |
 | `skip_empty` | flag | 空值时跳过校验 |
 | `fail_fast` | flag | 失败后跳过该字段后续规则 |
 | `omit_if_skip` | flag | 跳过时从 Output 移除 |
@@ -299,7 +299,7 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 ```cue
 {
     payment_type: "credit" | "debit"
-    cvv: string @meta(conditional, required_if=this.payment_type == "credit")
+    cvv?: string @meta(conditional, required_if=this.payment_type == "credit")
 
     pan: =~"^[0-9]{16}$" @meta(priority=1)
     luhn_check: bool @blob(this.pan.luhn_valid()) @meta(priority=2)
@@ -308,6 +308,17 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
     fee?: number @meta(optional, skip_if=this.payment_type == "debit", omit_if_skip)
 }
 ```
+
+> **`@meta(optional)` 与 `@meta(conditional)` 同时放宽 CUE 层的必填性。**
+> 带这两个标记的字段即使在 CUE 语法中声明为必填，也会被视为容许缺失，
+> 因此 `cvv: string @meta(conditional, …)` 与 `cvv?: string @meta(conditional, …)`
+> 行为完全相同：不会报 `E1M01`，`required_if` 得以执行，credit 支付缺少 `cvv`
+> 时报 `E3C01`。显式写 `?` 是更清晰的写法 —— 让 CUE 层与 `@meta` 层表达一致 ——
+> 但并非正确性所必需。
+
+> 目前 `conditional` 与 `optional` 完全等价 —— `conditional` 隐含 `optional`，
+> 且没有其他行为区分两者。当字段的存在性由 `required_if` 决定时，
+> 建议使用 `conditional` 以表达意图。
 
 </details>
 
@@ -643,7 +654,7 @@ let r = process_schema(data: this.payload, name: "payment")
 reg := schemix.NewRegistry()       // 内部共享 CUE context
 reg.Register("user", cueSrc)       // 编译 + 存储
 reg.Has("user")                    // true
-reg.List()                         // ["user"]
+reg.List()                         // ["user"]，按字母序排序
 reg.Len()                          // 1
 reg.Unregister("user")             // 移除
 

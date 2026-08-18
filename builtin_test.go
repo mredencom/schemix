@@ -1,7 +1,10 @@
 package schemix
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // TestBuiltinTable exercises every built-in validator method with ≥3 named subtests
@@ -498,4 +501,167 @@ func TestBuiltinTable(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestConflict_BuiltinMethodBlocked(t *testing.T) {
+	_, err := New(`{ email: string }`,
+		WithMethod("is_email", func(v any) (any, error) {
+			return false, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error when registering method that conflicts with builtin")
+	}
+	if !strings.Contains(err.Error(), "conflicts with a built-in") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestConflict_BuiltinFunctionBlocked(t *testing.T) {
+	_, err := New(`{ d: string }`,
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error for conflicting function name")
+	}
+}
+
+func TestConflict_FuncMapBuiltinBlocked(t *testing.T) {
+	funcs := NewFuncMap(
+		Method("luhn_valid", func(v any) (any, error) { return false, nil }),
+	)
+	_, err := New(`{ pan: string }`, WithFuncMap(funcs))
+	if err == nil {
+		t.Fatal("expected error for conflicting FuncMap method")
+	}
+}
+
+func TestConflict_CrossNamespaceAllowed(t *testing.T) {
+	// is_email 是内置 Method，用户注册同名 Function 不冲突（不同命名空间）
+	v, err := New(`{ email: string, check: bool @blob(is_email(this.email)) }`,
+		WithFunction("is_email", func(args ...any) (bloblang.Function, error) {
+			s, _ := args[0].(string)
+			return func() (any, error) {
+				return strings.Contains(s, "@"), nil
+			}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("cross-namespace should not conflict: %v", err)
+	}
+	r := v.Process(map[string]any{"email": "a@b.com"})
+	if !r.Valid {
+		t.Errorf("expected valid: %v", r.Errors)
+	}
+}
+
+func TestConflict_NonBuiltinNameAllowed(t *testing.T) {
+	_, err := New(`{ x: int, check: bool @blob(my_custom_check(this.x)) }`,
+		WithFunction("my_custom_check", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("non-conflicting name should work: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideAllows(t *testing.T) {
+	// 显式 WithOverride 允许覆盖 is_email
+	v, err := New(`{ email: string, check: bool @blob(this.email.is_email()) }`,
+		WithOverrideMethod("is_email"),
+		WithMethod("is_email", func(v any) (any, error) {
+			// 自定义逻辑：只接受 @company.com 结尾
+			s, _ := v.(string)
+			return strings.HasSuffix(s, "@company.com"), nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("expected no error with WithOverride: %v", err)
+	}
+
+	// 公司邮箱通过
+	r := v.Process(map[string]any{"email": "alice@company.com"})
+	if !r.Valid {
+		t.Error("expected valid for @company.com")
+	}
+
+	// 普通邮箱被自定义逻辑拒绝
+	r = v.Process(map[string]any{"email": "alice@gmail.com"})
+	if r.Valid {
+		t.Error("expected invalid — custom is_email rejects non-company emails")
+	}
+}
+
+func TestConflict_WithOverrideMultiple(t *testing.T) {
+	_, err := New(`{ x: string }`,
+		WithOverrideMethod("is_email", "luhn_valid"),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithMethod("luhn_valid", func(v any) (any, error) { return true, nil }),
+	)
+	if err != nil {
+		t.Fatalf("expected no error with multiple overrides: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideOnlySpecified(t *testing.T) {
+	// Override is_email but NOT luhn_valid — luhn_valid should still be blocked
+	_, err := New(`{ x: string }`,
+		WithOverrideMethod("is_email"),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithMethod("luhn_valid", func(v any) (any, error) { return true, nil }),
+	)
+	if err == nil {
+		t.Fatal("expected error — luhn_valid not in override list")
+	}
+	if !strings.Contains(err.Error(), "luhn_valid") {
+		t.Errorf("error should mention luhn_valid: %v", err)
+	}
+}
+
+func TestConflict_WithOverrideAll(t *testing.T) {
+	// WithOverrideAll 允许覆盖任何内置
+	v, err := New(`{
+		email: string
+		check: bool @blob(this.email.is_email())
+		date:  string
+		valid: bool @blob(is_valid_date(this.date))
+	}`,
+		WithOverrideAll(),
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("WithOverrideAll should allow everything: %v", err)
+	}
+	r := v.Process(map[string]any{"email": "anything", "date": "anything"})
+	if !r.Valid {
+		t.Errorf("all overridden to return true: %v", r.Errors)
+	}
+}
+
+func TestConflict_WithOverrideFunc(t *testing.T) {
+	// 只允许覆盖 function，method 仍然受保护
+	_, err := New(`{ d: string }`,
+		WithOverrideFunc("is_valid_date"),
+		WithFunction("is_valid_date", func(args ...any) (bloblang.Function, error) {
+			return func() (any, error) { return true, nil }, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("WithOverrideFunc should allow: %v", err)
+	}
+
+	// 但 method 仍然受保护
+	_, err = New(`{ x: string }`,
+		WithOverrideFunc("is_email"), // 这个对 method 无效
+		WithMethod("is_email", func(v any) (any, error) { return true, nil }),
+	)
+	if err == nil {
+		t.Fatal("WithOverrideFunc should NOT protect methods")
+	}
 }

@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/warpstreamlabs/bento/public/bloblang"
@@ -355,13 +356,31 @@ func TestRegistry_List(t *testing.T) {
 	if len(names) != 2 {
 		t.Errorf("expected 2 names, got %d", len(names))
 	}
-	// Check both exist (order not guaranteed)
-	found := map[string]bool{}
-	for _, n := range names {
-		found[n] = true
+	// List sorts its result, so the order is part of the contract.
+	want := []string{"payment", "test_schema"}
+	if !slices.Equal(names, want) {
+		t.Errorf("List() = %v, want %v", names, want)
 	}
-	if !found["test_schema"] || !found["payment"] {
-		t.Errorf("unexpected names: %v", names)
+}
+
+// TestRegistry_List_sorted pins the ordering guarantee. Before it existed, List
+// walked the internal map and returned a different order on different runs,
+// which made any caller that displayed or compared the result nondeterministic.
+func TestRegistry_List_sorted(t *testing.T) {
+	reg := NewRegistry()
+	// Register in an order that is neither sorted nor reverse-sorted.
+	for _, name := range []string{"user", "product", "zebra", "address", "mango"} {
+		if err := reg.Register(name, `{ x: int }`); err != nil {
+			t.Fatalf("Register(%q): %v", name, err)
+		}
+	}
+
+	want := []string{"address", "mango", "product", "user", "zebra"}
+	// Repeat: a map-order bug would surface only intermittently.
+	for i := range 50 {
+		if got := reg.List(); !slices.Equal(got, want) {
+			t.Fatalf("iteration %d: List() = %v, want %v", i, got, want)
+		}
 	}
 }
 

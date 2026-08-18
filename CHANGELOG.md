@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom functions and methods, reusable `FuncMap`, schema composition, and introspection APIs.
 
 ### Changed
+- `Registry.List()` and the package-level `List()` now return names **sorted lexicographically**. Both previously returned whatever order the backing store produced — a Go map for `Registry`, `sync.Map.Range` for the global store — which varied between calls on the same contents (measured: three distinct orderings across 200 runs of one registration sequence). No documented behaviour changes, since no order was ever guaranteed, but callers that displayed, diffed, or asserted on the result were nondeterministic.
 - `cue.Context.Encode` is now **lazy**: the input map is converted into a `cue.Value` only when a field actually needs one. Schemas whose fields are all served by the Go-native fast path validate with **zero allocations** (`Validate` on five scalar fields: 2.94µs / 59 allocs → 382ns / 0 allocs). The encode still runs for `@blob()` rules on present fields, nested structs, arrays, constraints too complex for a descriptor, and `uint*` values on `int` constraints. Verdicts are unchanged and pinned by the differential CUE oracle tests.
 - `FailPriority` now collects CUE and Blob errors from the first failing priority group and skips all higher groups.
 - `@meta(priority=N)` accepts negative values and uses overflow-safe ordering.

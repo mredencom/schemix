@@ -38,15 +38,12 @@ jobs:
         run: |
           set -euo pipefail
           go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-          # example/ contains executable documentation. Run it above, but exclude
-          # its package-main statements from the library coverage threshold.
-          awk 'NR == 1 || $1 !~ /\/example\//' coverage.out > coverage-gated.out
-          coverage="$(go tool cover -func=coverage-gated.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          coverage="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
           if [[ ! "$coverage" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
             echo "Unable to parse total coverage: $coverage" >&2
             exit 1
           fi
-          echo "Gated coverage: ${coverage}%"
+          echo "Total coverage: ${coverage}%"
           awk -v coverage="$coverage" 'BEGIN { exit !(coverage >= 70) }'
 
       - name: Upload coverage
@@ -107,6 +104,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The example/ filter is a no-op on this tree (examples are now Example
+          # functions in the root package); it keeps the base checkout, which may
+          # predate that change, comparable to head.
           packages="$(go list ./... | grep -v '/example$')"
           go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_base.txt
 
@@ -115,6 +115,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The example/ filter is a no-op on this tree (examples are now Example
+          # functions in the root package); it keeps the base checkout, which may
+          # predate that change, comparable to head.
           packages="$(go list ./... | grep -v '/example$')"
           go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_head.txt
 
