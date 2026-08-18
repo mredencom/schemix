@@ -656,7 +656,7 @@ let r = process_schema(data: this.payload, name: "payment")
 reg := schemix.NewRegistry()       // shared CUE context internally
 reg.Register("user", cueSrc)       // compile + store
 reg.Has("user")                    // true
-reg.List()                         // ["user"]
+reg.List()                         // ["user"] — sorted
 reg.Len()                          // 1
 reg.Unregister("user")             // remove
 

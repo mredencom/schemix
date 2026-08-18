@@ -2,7 +2,6 @@ package schemix_test
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/mredencom/schemix"
 	"github.com/warpstreamlabs/bento/public/bloblang"
@@ -27,11 +26,9 @@ func ExampleRegistry() {
 
 	fmt.Println("count:      ", reg.Len())
 
-	// List does not guarantee an order — it walks the internal map. Sort it
-	// when the order matters (for display, diffing, or tests).
-	names := reg.List()
-	sort.Strings(names)
-	fmt.Println("names:      ", names)
+	// List returns names sorted lexicographically, so the result can be
+	// displayed or compared directly.
+	fmt.Println("names:      ", reg.List())
 
 	fmt.Println("has user:   ", reg.Has("user"))
 	fmt.Println("has order:  ", reg.Has("order"))

@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -57,13 +58,19 @@ func Has(name string) bool {
 	return ok
 }
 
-// List returns the names of all globally registered Validators.
+// List returns the names of all globally registered Validators, sorted
+// lexicographically.
+//
+// The order is guaranteed so that callers can display, diff, or assert on the
+// result directly. sync.Map.Range visits entries in an unspecified order, so
+// without the sort the result varied between calls.
 func List() []string {
 	var names []string
 	globalStore.Range(func(key, _ any) bool {
 		names = append(names, key.(string))
 		return true
 	})
+	slices.Sort(names)
 	return names
 }
 

@@ -643,7 +643,7 @@ let r = process_schema(data: this.payload, name: "payment")
 reg := schemix.NewRegistry()       // 内部共享 CUE context
 reg.Register("user", cueSrc)       // 编译 + 存储
 reg.Has("user")                    // true
-reg.List()                         // ["user"]
+reg.List()                         // ["user"]，按字母序排序
 reg.Len()                          // 1
 reg.Unregister("user")             // 移除
 

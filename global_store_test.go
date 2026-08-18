@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -138,6 +139,28 @@ func TestGlobalStore_ListAndLen(t *testing.T) {
 	names := List()
 	if len(names) != 3 {
 		t.Errorf("expected 3 names, got %d", len(names))
+	}
+	// List sorts its result, so the order is part of the contract.
+	if want := []string{"a", "b", "c"}; !slices.Equal(names, want) {
+		t.Errorf("List() = %v, want %v", names, want)
+	}
+}
+
+// TestGlobalStore_List_sorted pins the ordering guarantee for the package-level
+// store, which is backed by sync.Map and therefore had no inherent order.
+func TestGlobalStore_List_sorted(t *testing.T) {
+	t.Cleanup(resetGlobalStore)
+	resetGlobalStore()
+
+	for _, name := range []string{"user", "product", "zebra", "address", "mango"} {
+		Register(name, MustNew(`{ x: int }`))
+	}
+
+	want := []string{"address", "mango", "product", "user", "zebra"}
+	for i := range 50 {
+		if got := List(); !slices.Equal(got, want) {
+			t.Fatalf("iteration %d: List() = %v, want %v", i, got, want)
+		}
 	}
 }
 

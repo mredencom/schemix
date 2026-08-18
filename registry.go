@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	"cuelang.org/go/cue"
@@ -71,6 +72,11 @@ func (r *Registry) Unregister(name string) bool {
 }
 
 // List returns the names of all registered validators.
+// List returns the names of all registered schemas, sorted lexicographically.
+//
+// The order is guaranteed so that callers can display, diff, or assert on the
+// result directly. Without it the names came straight out of the internal map
+// and varied between calls.
 func (r *Registry) List() []string {
 	r.mu.RLock()
 	names := make([]string, 0, len(r.validators))
@@ -78,6 +84,7 @@ func (r *Registry) List() []string {
 		names = append(names, name)
 	}
 	r.mu.RUnlock()
+	slices.Sort(names)
 	return names
 }
 
