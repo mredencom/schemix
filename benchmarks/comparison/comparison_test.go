@@ -601,9 +601,10 @@ func BenchmarkScalarValidParallel(b *testing.B) {
 //
 // It exists to quantify exactly what the fast path does and does not cover:
 // compileCUEFields recurses into struct fields and assigns each scalar child
-// its own fastConstraint, but a list field gets no descriptor at all
-// (extractFastConstraint returns nil for cue.ListKind), so the whole list —
-// every element, every scalar inside it — goes through cue.Value.Unify.
+// its own fastConstraint, and a list of *scalars* gets an element descriptor
+// applied per element. A list of *structs* gets neither — a per-element scalar
+// check cannot express a struct's field set — so the whole list, every element
+// and every scalar inside it, goes through cue.Value.Unify.
 
 // elementRules is the shared 3-constraint payload.
 const elementRules = `{
@@ -634,7 +635,8 @@ var structNestedData = map[string]any{
 	"item": map[string]any{"name": "Laptop", "qty": int64(2), "tag": "A"},
 }
 
-// arraySchema wraps the identical three constraints in a list. No fast path.
+// arraySchema wraps the identical three constraints in a list. Struct elements
+// get no descriptor, so this is the shape that still needs cue.Value.Unify.
 var arraySchema = schemix.MustNew(`{
 	items: [...` + elementRules + `]
 }`)

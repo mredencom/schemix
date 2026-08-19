@@ -50,167 +50,230 @@ func (l *lazyCUEValue) value() cue.Value {
 //   - Optimization #5: data is a lazyCUEValue, so cue.Context.Encode is skipped
 //     entirely when every field is handled by the Go-native fast path
 //   - Correctness: present @blob fields still satisfy their CUE constraints before Blob execution
+//
+// Each field takes at most three steps, in widening order of cost: is a value
+// present, can a Go descriptor decide it, and only then CUE.
+//
+// The presence check stays inlined in the loop rather than living in a helper.
+// It runs for every field of every validation, and moving it behind a call cost
+// a measured 4.5% on the scalar path — enough to trip the benchmark gate. Only
+// the branches that report a problem, or that need CUE, are functions: those run
+// rarely enough that a call is free.
 func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, rawData map[string]any, result *Result) {
 	for i := range fields {
 		f := &fields[i]
 
-		// Fast Go-level existence check before touching CUE.
-		// Use field name (not full path) since rawData is the current level map
 		goVal, exists := rawData[f.name]
 		if !exists {
-			// Field is truly missing from input data
+			// A @blob field may be computed rather than supplied, so its absence
+			// from the input is not in itself an error.
 			if !f.optional && !f.hasBlob {
-				detail := fmt.Sprintf("required field %q is missing", f.name)
-				result.Valid = false
-				result.Errors = append(result.Errors, ValidationError{
-					Code:      CodeRequiredMissing,
-					Path:      f.path,
-					Type:      TypeCUE,
-					Message:   v.formatMessage(CodeRequiredMissing, f.path, detail),
-					FieldType: f.fieldType,
-				})
+				v.recordMissingField(f, result)
 			}
 			continue
 		}
 		if goVal == nil {
-			// Field exists but value is nil — check if schema allows null
-			if f.nullable {
-				continue
-			}
-			// Non-nullable field with nil value → required missing
-			detail := fmt.Sprintf("field %q is nil but not nullable", f.path)
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Code:      CodeRequiredMissing,
-				Path:      f.path,
-				Type:      TypeCUE,
-				Message:   v.formatMessage(CodeRequiredMissing, f.path, detail),
-				FieldType: f.fieldType,
-			})
-			continue
-		}
-
-		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
-		if f.fast != nil {
-			fr := validateFast(f.fast, goVal)
-			if v.metrics != nil {
-				v.metrics.ObserveFastpathDecision(f.path, fr.Handled)
-			}
-			if fr.Handled {
-				if !fr.Valid {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:       fr.Code,
-						Path:       f.path,
-						Type:       TypeCUE,
-						Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
-						FieldType:  f.fieldType,
-						Suggestion: fr.Suggestion,
-					})
-				}
-				continue
-			}
-			// fr.Handled=false: fall through to CUE Unify
-		}
-
-		// Only now do we touch CUE for actual constraint validation, which is
-		// also the point where the lazy encode is forced.
-		fieldData := data.value().LookupPath(cue.ParsePath(f.name))
-		if !fieldData.Exists() {
-			continue
-		}
-
-		// Struct validation: recurse into children
-		if f.isStruct && fieldData.IncompleteKind() == cue.StructKind {
-			nestedRaw, _ := goVal.(map[string]any)
-			if nestedRaw != nil && len(f.children) > 0 {
-				v.validateCUEFields(f.children, encodedCUEValue(fieldData), nestedRaw, result)
+			if !f.nullable {
+				v.recordNonNullableNil(f, result)
 			}
 			continue
 		}
 
-		// Struct field with wrong type (e.g. int instead of struct)
-		if f.isStruct {
-			detail := fmt.Sprintf("field %q expects struct, got %T", f.path, goVal)
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Code:      CodeTypeMismatch,
-				Path:      f.path,
-				Type:      TypeCUE,
-				Message:   v.formatMessage(CodeTypeMismatch, f.path, detail),
-				FieldType: f.fieldType,
-			})
+		if f.fast != nil && v.checkFast(f, goVal, result) {
 			continue
 		}
-
-		// List validation
-		if f.isList && fieldData.IncompleteKind() == cue.ListKind {
-			listUnified := f.schema.Unify(fieldData)
-			if err := listUnified.Validate(cue.Concrete(true)); err != nil {
-				cueErrs := cueerrors.Errors(err)
-				collected := make([]ValidationError, 0, len(cueErrs))
-				for _, e := range cueErrs {
-					code := classifyCUEErrorStructured(e)
-					if code == CodeCUEOther {
-						code = CodeArrayElement
-					}
-					ePath := formatCUEErrorPath(f.path, e)
-					collected = append(collected, ValidationError{
-						Code:    code,
-						Path:    ePath,
-						Type:    TypeCUE,
-						Message: e.Error(),
-					})
-				}
-				// CUE emits one error per rejected disjunct plus a summary line;
-				// collapse those into a single enum error before formatting, so
-				// the caller sees one error per offending field.
-				collected = collapseDisjunctionErrors(collected)
-				for i := range collected {
-					collected[i].Message = v.formatMessage(
-						collected[i].Code, collected[i].Path, collected[i].Message)
-				}
-				result.Valid = false
-				result.Errors = append(result.Errors, collected...)
-			}
-			continue
-		}
-
-		// List field with wrong type (e.g. string instead of list)
-		if f.isList {
-			detail := fmt.Sprintf("field %q expects list, got %T", f.path, goVal)
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Code:      CodeTypeMismatch,
-				Path:      f.path,
-				Type:      TypeCUE,
-				Message:   v.formatMessage(CodeTypeMismatch, f.path, detail),
-				FieldType: f.fieldType,
-			})
-			continue
-		}
-
-		// Scalar/enum validation: Unify + Validate
-		unified := f.schema.Unify(fieldData)
-		if err := unified.Validate(cue.Concrete(true)); err != nil {
-			cueErrs := cueerrors.Errors(err)
-			for _, e := range cueErrs {
-				code := classifyCUEErrorStructured(e)
-				result.Valid = false
-				result.Errors = append(result.Errors, ValidationError{
-					Code:      code,
-					Path:      f.path,
-					Type:      TypeCUE,
-					Message:   v.formatMessage(code, f.path, e.Error()),
-					FieldType: f.fieldType,
-				})
-			}
-		}
+		v.validateViaCUE(f, data, goVal, result)
 	}
 }
 
-// validateCUERecursive is the legacy recursive validation method.
-// Kept for reference; the optimized validateCUEFields is used at runtime.
+// recordMissingField reports a required field absent from the input.
+func (v *Validator) recordMissingField(f *cueField, result *Result) {
+	v.recordFieldError(result, f, CodeRequiredMissing, f.path,
+		fmt.Sprintf("required field %q is missing", f.name))
+}
+
+// recordNonNullableNil reports a field present as nil where the schema declares
+// no null alternative.
+func (v *Validator) recordNonNullableNil(f *cueField, result *Result) {
+	v.recordFieldError(result, f, CodeRequiredMissing, f.path,
+		fmt.Sprintf("field %q is nil but not nullable", f.path))
+}
+
+// validateViaCUE is the slow path, reached only for fields no descriptor could
+// decide. Reading the field forces the lazy encode, so everything that could be
+// answered without a cue.Value has already been answered.
+func (v *Validator) validateViaCUE(f *cueField, data *lazyCUEValue, goVal any, result *Result) {
+	fieldData := data.value().LookupPath(f.cuePath)
+	if !fieldData.Exists() {
+		return
+	}
+
+	switch {
+	case f.isStruct:
+		v.validateStructField(f, fieldData, goVal, result)
+	case f.isList:
+		v.validateListField(f, fieldData, goVal, result)
+	default:
+		v.validateScalarField(f, fieldData, result)
+	}
+}
+
+// validateStructField recurses into a nested struct's own descriptors, which is
+// what keeps its scalar leaves on the fast path.
+func (v *Validator) validateStructField(f *cueField, fieldData cue.Value, goVal any, result *Result) {
+	if fieldData.IncompleteKind() != cue.StructKind {
+		v.recordFieldError(result, f, CodeTypeMismatch, f.path,
+			fmt.Sprintf("field %q expects struct, got %T", f.path, goVal))
+		return
+	}
+
+	nestedRaw, _ := goVal.(map[string]any)
+	if nestedRaw == nil || len(f.children) == 0 {
+		return
+	}
+	v.validateCUEFields(f.children, encodedCUEValue(fieldData), nestedRaw, result)
+}
+
+// validateListField handles the lists no element descriptor covers — struct
+// elements, fixed arity, list-level constraints — by unifying the whole value.
+func (v *Validator) validateListField(f *cueField, fieldData cue.Value, goVal any, result *Result) {
+	if fieldData.IncompleteKind() != cue.ListKind {
+		v.recordFieldError(result, f, CodeTypeMismatch, f.path,
+			fmt.Sprintf("field %q expects list, got %T", f.path, goVal))
+		return
+	}
+
+	err := f.schema.Unify(fieldData).Validate(cue.Concrete(true))
+	if err == nil {
+		return
+	}
+	result.Valid = false
+	result.Errors = append(result.Errors, v.listErrors(f, err)...)
+}
+
+// listErrors maps CUE's diagnostics for a list onto one error per offending
+// element, with the index in the path.
+func (v *Validator) listErrors(f *cueField, err error) []ValidationError {
+	cueErrs := cueerrors.Errors(err)
+	collected := make([]ValidationError, 0, len(cueErrs))
+	for _, e := range cueErrs {
+		code := classifyCUEErrorStructured(e)
+		if code == CodeCUEOther {
+			code = CodeArrayElement
+		}
+		collected = append(collected, ValidationError{
+			Code:    code,
+			Path:    formatCUEErrorPath(f.path, e),
+			Type:    TypeCUE,
+			Message: e.Error(),
+		})
+	}
+
+	// CUE emits one error per rejected disjunct plus a summary line; collapse
+	// those into a single enum error before formatting, so the caller sees one
+	// error per offending field.
+	collected = collapseDisjunctionErrors(collected)
+	for i := range collected {
+		collected[i].Message = v.formatMessage(
+			collected[i].Code, collected[i].Path, collected[i].Message)
+	}
+	return collected
+}
+
+// validateScalarField covers the scalars a descriptor refused: a constraint
+// outside its vocabulary, or a value it could not decide such as a uint.
+func (v *Validator) validateScalarField(f *cueField, fieldData cue.Value, result *Result) {
+	err := f.schema.Unify(fieldData).Validate(cue.Concrete(true))
+	if err == nil {
+		return
+	}
+	for _, e := range cueerrors.Errors(err) {
+		v.recordFieldError(result, f, classifyCUEErrorStructured(e), f.path, e.Error())
+	}
+}
+
+// recordFieldError appends one error against f and marks the result invalid.
+//
+// The four steps it replaces — flip Valid, build the struct, format the message,
+// append — appeared ten times in this file. The fast-path helpers below build
+// their own because they also carry a Suggestion.
+func (v *Validator) recordFieldError(result *Result, f *cueField, code ErrorCode, path, detail string) {
+	result.Valid = false
+	result.Errors = append(result.Errors, ValidationError{
+		Code:      code,
+		Path:      path,
+		Type:      TypeCUE,
+		Message:   v.formatMessage(code, path, detail),
+		FieldType: f.fieldType,
+	})
+}
+
+// checkFast runs the Go-native descriptor for one field and records any
+// violation. It reports whether the descriptor decided the field; false means the
+// caller must fall through to CUE Unify.
+//
+// Lists take a separate route because they can reject several elements at once,
+// which one fastResult cannot carry.
+func (v *Validator) checkFast(f *cueField, goVal any, result *Result) bool {
+	if f.fast.kind == constraintList {
+		return v.checkFastList(f, goVal, result)
+	}
+
+	fr := validateFast(f.fast, goVal)
+	if v.metrics != nil {
+		v.metrics.ObserveFastpathDecision(f.path, fr.Handled)
+	}
+	if !fr.Handled {
+		return false
+	}
+	if !fr.Valid {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Code:       fr.Code,
+			Path:       f.path,
+			Type:       TypeCUE,
+			Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
+			FieldType:  f.fieldType,
+			Suggestion: fr.Suggestion,
+		})
+	}
+	return true
+}
+
+// checkFastList records one error per rejected element, indexed the way CUE does
+// it: items[1], not items.
+func (v *Validator) checkFastList(f *cueField, goVal any, result *Result) bool {
+	failures, handled := validateFastElements(f.fast, goVal)
+	if v.metrics != nil {
+		v.metrics.ObserveFastpathDecision(f.path, handled)
+	}
+	if !handled {
+		return false
+	}
+	if len(failures) > 0 {
+		result.Valid = false
+		for _, ef := range failures {
+			ePath := indexedPath(f.path, ef.Index)
+			result.Errors = append(result.Errors, ValidationError{
+				Code:       ef.Code,
+				Path:       ePath,
+				Type:       TypeCUE,
+				Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
+				FieldType:  f.fieldType,
+				Suggestion: ef.Suggestion,
+			})
+		}
+	}
+	return true
+}
+
+// validateCUERecursive is the pre-descriptor validation path, walking the schema
+// with schema.Fields() on every call instead of using compiled descriptors.
+//
+// It is not dead code and not merely "kept for reference": BenchmarkCUE_
+// ValidateRecursive_Legacy measures it, and that measurement is the denominator
+// behind the ~172x fast-path figure in the README. Deleting it would remove the
+// evidence for a published claim.
 func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, result *Result) {
 	if schema.IncompleteKind() != cue.StructKind {
 		return
@@ -290,7 +353,18 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 	}
 }
 
-// ─── Global Validator Store ──────────────────────────────────────────────────
+// ─── Error path formatting ───────────────────────────────────────────────────
+
+// indexedPath renders the path of a list element as parent[i], matching the
+// form formatCUEErrorPath produces for errors that come back from CUE.
+func indexedPath(parent string, index int) string {
+	buf := make([]byte, 0, len(parent)+12)
+	buf = append(buf, parent...)
+	buf = append(buf, '[')
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, ']')
+	return string(buf)
+}
 
 // formatCUEErrorPath formats a structured CUE error path using Go-style array indices.
 func formatCUEErrorPath(parent string, err error) string {

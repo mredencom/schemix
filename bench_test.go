@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -150,6 +151,42 @@ func BenchmarkProcess_Nested(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		v.Process(benchNestedData)
+	}
+}
+
+// ---------- Scalar-element lists ----------
+//
+// A list whose elements are scalars is served entirely by the fast path, unlike
+// [...{…}] whose struct elements still need cue.Value.Unify. These pin the
+// difference so a regression shows up as allocations reappearing.
+
+var benchScalarListSchema = `{
+	tags:   [...string]
+	counts: [...int & >0]
+	grades: [..."A" | "B" | "C"]
+}`
+
+func benchScalarListData(n int) map[string]any {
+	tags := make([]any, n)
+	counts := make([]any, n)
+	grades := make([]any, n)
+	for i := range n {
+		tags[i] = "tag" + strconv.Itoa(i)
+		counts[i] = int64(i + 1)
+		grades[i] = "B"
+	}
+	return map[string]any{"tags": tags, "counts": counts, "grades": grades}
+}
+
+func BenchmarkValidate_ScalarList(b *testing.B) {
+	v := MustNew(benchScalarListSchema)
+	for _, n := range []int{1, 10} {
+		data := benchScalarListData(n)
+		b.Run("elements_"+strconv.Itoa(n), func(b *testing.B) {
+			for b.Loop() {
+				v.Validate(data)
+			}
+		})
 	}
 }
 

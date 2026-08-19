@@ -1,7 +1,11 @@
 package schemix
 
 import (
+	"fmt"
 	"math"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -373,3 +377,350 @@ func TestNumericFastpathTypes(t *testing.T) {
 // =============================================================================
 // Nil / nullable / optional handling tests
 // =============================================================================
+
+// ─── Lists of scalar elements ───────────────────────────────────────────────
+//
+// A list has no fast descriptor, so the whole value goes to cue.Value.Unify:
+// measured 6367 ns and 116 allocations for a single-element [...string], against
+// 54 ns and zero allocations for three scalar fields. When every element is a
+// scalar the descriptor already knows how to check, that cost buys nothing.
+
+// TestListFastpath_ServesScalarElementLists asserts the descriptor is extracted
+// for an open list of scalars and that it handles the value, which is what lets
+// the encode be skipped.
+func TestListFastpath_ServesScalarElementLists(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		field  string
+		input  map[string]any
+	}{
+		{"strings", `{ tags: [...string] }`, "tags", map[string]any{"tags": []any{"a", "b"}}},
+		{"empty", `{ tags: [...string] }`, "tags", map[string]any{"tags": []any{}}},
+		{"ints-with-range", `{ n: [...int & >0] }`, "n", map[string]any{"n": []any{int64(1), int64(2)}}},
+		{"floats", `{ r: [...float & <=1.0] }`, "r", map[string]any{"r": []any{0.25, 0.5}}},
+		{"regex", `{ p: [...=~"^[0-9]{2}$"] }`, "p", map[string]any{"p": []any{"12"}}},
+		{"enum", `{ c: [..."a" | "b"] }`, "c", map[string]any{"c": []any{"a"}}},
+		{"bools", `{ b: [...bool] }`, "b", map[string]any{"b": []any{true, false}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v := MustNew(tc.schema, WithMetricsRecorder(rec))
+
+			r := v.Process(tc.input)
+			if !r.Valid {
+				t.Fatalf("expected valid input to pass, got errors=%v", r.Errors)
+			}
+
+			rec.mu.Lock()
+			calls := append([]fastpathObservation(nil), rec.fastpathCalls...)
+			rec.mu.Unlock()
+
+			var served bool
+			for _, c := range calls {
+				if c.fieldPath == tc.field {
+					if !c.hit {
+						t.Fatalf("field %q held a descriptor but did not handle the value", tc.field)
+					}
+					served = true
+				}
+			}
+			if !served {
+				t.Fatalf("field %q has no fast descriptor; a list of scalars must not "+
+					"need cue.Value.Unify", tc.field)
+			}
+		})
+	}
+}
+
+// TestListFastpath_SkipsEncode pins the payoff. cue.Context.Encode alone costs
+// 39 allocations, so staying below it proves no cue.Value was built.
+func TestListFastpath_SkipsEncode(t *testing.T) {
+	v := MustNew(`{ tags: [...string] }`)
+	data := map[string]any{"tags": []any{"alpha", "beta", "gamma"}}
+
+	if ok, errs := v.Validate(data); !ok {
+		t.Fatalf("precondition failed, schema should accept data: %v", errs)
+	}
+
+	const encodeAllocs = 39
+	got := testing.AllocsPerRun(200, func() {
+		v.Validate(data)
+	})
+
+	if got >= encodeAllocs {
+		t.Errorf("Validate allocated %.0f objects, want < %d — a list of scalar "+
+			"elements still appears to build a cue.Value", got, encodeAllocs)
+	}
+}
+
+// TestListFastpath_ReportsEveryOffendingElement pins the error contract against
+// CUE: one error per rejected element, indexed, not just the first one.
+func TestListFastpath_ReportsEveryOffendingElement(t *testing.T) {
+	cases := []struct {
+		name      string
+		schema    string
+		input     map[string]any
+		wantPaths []string
+		wantCode  ErrorCode
+	}{
+		{
+			name:      "every element rejected",
+			schema:    `{ tags: [...string] }`,
+			input:     map[string]any{"tags": []any{int64(1), int64(2)}},
+			wantPaths: []string{"tags[0]", "tags[1]"},
+			wantCode:  CodeTypeMismatch,
+		},
+		{
+			name:      "trailing elements rejected",
+			schema:    `{ tags: [...string] }`,
+			input:     map[string]any{"tags": []any{"ok", int64(2), int64(3)}},
+			wantPaths: []string{"tags[1]", "tags[2]"},
+			wantCode:  CodeTypeMismatch,
+		},
+		{
+			name:      "range violated per element",
+			schema:    `{ n: [...int & >0] }`,
+			input:     map[string]any{"n": []any{int64(1), int64(-1), int64(-2)}},
+			wantPaths: []string{"n[1]", "n[2]"},
+			wantCode:  CodeRangeViolation,
+		},
+		{
+			name:      "enum violated per element",
+			schema:    `{ c: [..."a" | "b"] }`,
+			input:     map[string]any{"c": []any{"z", "y"}},
+			wantPaths: []string{"c[0]", "c[1]"},
+			wantCode:  CodeEnumInvalid,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MustNew(tc.schema).ProcessWithMode(tc.input, FailAll)
+			if got.Valid {
+				t.Fatal("expected invalid")
+			}
+
+			paths := make([]string, 0, len(got.Errors))
+			for _, e := range got.Errors {
+				paths = append(paths, e.Path)
+				if e.Code != tc.wantCode {
+					t.Errorf("error at %s has code %s, want %s", e.Path, e.Code, tc.wantCode)
+				}
+				if e.Type != TypeCUE {
+					t.Errorf("error at %s has type %q, want %q", e.Path, e.Type, TypeCUE)
+				}
+			}
+			if !slices.Equal(paths, tc.wantPaths) {
+				t.Errorf("error paths = %v, want %v", paths, tc.wantPaths)
+			}
+
+			// The same schema driven purely through CUE must agree on the paths.
+			oracle := processCUEOnly(t, tc.schema, tc.input)
+			oraclePaths := make([]string, 0, len(oracle.Errors))
+			for _, e := range oracle.Errors {
+				oraclePaths = append(oraclePaths, e.Path)
+			}
+			if !slices.Equal(paths, oraclePaths) {
+				t.Errorf("fast path reported %v, CUE oracle reported %v", paths, oraclePaths)
+			}
+		})
+	}
+}
+
+// TestListFastpath_RefusesShapesItCannotRepresent keeps the descriptor away from
+// lists whose verdict does not reduce to a per-element scalar check.
+func TestListFastpath_RefusesShapesItCannotRepresent(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		field  string
+		input  map[string]any
+	}{
+		{"list-level conjunct", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", "tags",
+			map[string]any{"tags": []any{"a", "b"}}},
+		{"fixed-arity tuple", `{ p: [string, string] }`, "p",
+			map[string]any{"p": []any{"a", "b"}}},
+		{"fixed head, open tail", `{ p: [string, ...int] }`, "p",
+			map[string]any{"p": []any{"a", int64(1)}}},
+		{"disjunction of list types", `{ tags: [...string] | [...int] }`, "tags",
+			map[string]any{"tags": []any{int64(1)}}},
+		{"struct elements", `{ items: [...{qty: int}] }`, "items",
+			map[string]any{"items": []any{map[string]any{"qty": int64(1)}}}},
+		{"nested lists", `{ m: [...[...string]] }`, "m",
+			map[string]any{"m": []any{[]any{"a"}}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v := MustNew(tc.schema, WithMetricsRecorder(rec))
+
+			r := v.Process(tc.input)
+			if !r.Valid {
+				t.Fatalf("precondition failed, schema should accept data: %v", r.Errors)
+			}
+
+			rec.mu.Lock()
+			calls := append([]fastpathObservation(nil), rec.fastpathCalls...)
+			rec.mu.Unlock()
+
+			for _, c := range calls {
+				if c.fieldPath == tc.field && c.hit {
+					t.Fatalf("field %q was served by the fast path, but %s does not "+
+						"reduce to a per-element scalar check", tc.field, tc.schema)
+				}
+			}
+		})
+	}
+}
+
+// TestListFastpath_FallsBackWhenAnElementIsUnrepresentable covers a value the
+// element descriptor cannot decide. Unsigned integers make the scalar check
+// return Handled=false, and a list must then hand the whole value to CUE rather
+// than accept the elements it happens to understand.
+func TestListFastpath_FallsBackWhenAnElementIsUnrepresentable(t *testing.T) {
+	const schema = `{ n: [...int & >0] }`
+	input := map[string]any{"n": []any{int64(1), uint64(2), int64(-3)}}
+
+	got := MustNew(schema).ProcessWithMode(input, FailAll)
+	want := processCUEOnly(t, schema, input)
+
+	if got.Valid != want.Valid {
+		t.Fatalf("Valid = %v, want %v (CUE oracle); got errors=%v, oracle errors=%v",
+			got.Valid, want.Valid, got.Errors, want.Errors)
+	}
+	gotPaths := make([]string, 0, len(got.Errors))
+	for _, e := range got.Errors {
+		gotPaths = append(gotPaths, e.Path)
+	}
+	wantPaths := make([]string, 0, len(want.Errors))
+	for _, e := range want.Errors {
+		wantPaths = append(wantPaths, e.Path)
+	}
+	if !slices.Equal(gotPaths, wantPaths) {
+		t.Errorf("error paths = %v, want %v (CUE oracle)", gotPaths, wantPaths)
+	}
+}
+
+// ─── Enum lookup strategy ───────────────────────────────────────────────────
+
+// TestEnumLookup_LargeEnumsUseHashLookup asserts the lookup structure directly,
+// because that structure *is* the behaviour under test here and a wall-clock
+// assertion in a unit test would be flaky. The benchmark gate in CI covers the
+// timing side.
+//
+// Measured with the value already boxed in an any and the hit at the average
+// position, a scan costs 3.1 ns at n=3 but 158 ns at n=180, while a hash lookup
+// stays near 5 ns. Below the threshold the scan wins, so small enums — the
+// common case — must keep it.
+func TestEnumLookup_LargeEnumsUseHashLookup(t *testing.T) {
+	build := func(n int) string {
+		alts := make([]string, n)
+		for i := range alts {
+			alts[i] = fmt.Sprintf("%q", fmt.Sprintf("code_%03d", i))
+		}
+		return "{ c: " + strings.Join(alts, " | ") + " }"
+	}
+
+	t.Run("small enum keeps the scan", func(t *testing.T) {
+		v := MustNew(build(enumSetThreshold - 1))
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.stringEnumSet != nil {
+			t.Errorf("built a hash set for %d candidates; a scan is faster below %d",
+				enumSetThreshold-1, enumSetThreshold)
+		}
+	})
+
+	t.Run("large enum uses a set", func(t *testing.T) {
+		const n = 60
+		v := MustNew(build(n))
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.stringEnumSet == nil {
+			t.Fatalf("still scanning %d candidates linearly", n)
+		}
+		if len(fc.stringEnumSet) != n {
+			t.Errorf("set holds %d candidates, want %d", len(fc.stringEnumSet), n)
+		}
+	})
+
+	t.Run("large int enum uses a set", func(t *testing.T) {
+		const n = 60
+		alts := make([]string, n)
+		for i := range alts {
+			alts[i] = strconv.Itoa(i)
+		}
+		v := MustNew("{ n: " + strings.Join(alts, " | ") + " }")
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.intEnumSet == nil {
+			t.Fatalf("still scanning %d int candidates linearly", n)
+		}
+	})
+}
+
+// TestEnumLookup_StrategyDoesNotChangeBehaviour pins what must hold whichever
+// lookup a schema ends up with. The listing order matters most: a map has none,
+// so the candidate list in the message must keep coming from the ordered slice.
+func TestEnumLookup_StrategyDoesNotChangeBehaviour(t *testing.T) {
+	// Straddle the threshold so one schema scans and the other hashes.
+	for _, n := range []int{3, 60} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			alts := make([]string, n)
+			want := make([]string, n)
+			for i := range alts {
+				want[i] = fmt.Sprintf("code_%03d", i)
+				alts[i] = fmt.Sprintf("%q", want[i])
+			}
+			schema := "{ c: " + strings.Join(alts, " | ") + " }"
+			v := MustNew(schema)
+
+			// Every candidate is accepted, wherever it sits in the list.
+			for _, candidate := range want {
+				if ok, errs := v.Validate(map[string]any{"c": candidate}); !ok {
+					t.Fatalf("candidate %q rejected: %v", candidate, errs)
+				}
+			}
+
+			// A non-candidate is rejected, and the message lists every candidate
+			// in declaration order.
+			r := v.Process(map[string]any{"c": "code_999"})
+			if r.Valid {
+				t.Fatal("expected a non-candidate to be rejected")
+			}
+			if len(r.Errors) != 1 {
+				t.Fatalf("want exactly 1 error, got %d: %v", len(r.Errors), r.Errors)
+			}
+			e := r.Errors[0]
+			if e.Code != CodeEnumInvalid {
+				t.Errorf("code = %s, want %s", e.Code, CodeEnumInvalid)
+			}
+			if got := stringEnumDetail("code_999", want); e.Message != got {
+				t.Errorf("message = %q, want %q — the candidate list must come from "+
+					"the ordered slice, not from map iteration", e.Message, got)
+			}
+
+			// Suggestion still finds the closest candidate.
+			r2 := v.Process(map[string]any{"c": "code_00"})
+			if len(r2.Errors) != 1 || r2.Errors[0].Suggestion == "" {
+				t.Errorf("expected a suggestion for a near-miss, got %v", r2.Errors)
+			}
+
+			// A wrong type is still a type error, not an enum error.
+			r3 := v.Process(map[string]any{"c": int64(1)})
+			if len(r3.Errors) != 1 || r3.Errors[0].Code != CodeTypeMismatch {
+				t.Errorf("want a single %s, got %v", CodeTypeMismatch, r3.Errors)
+			}
+		})
+	}
+}

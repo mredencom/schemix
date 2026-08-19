@@ -24,14 +24,14 @@ CUE constraints + Bloblang dynamic expressions, unified.
 graph TD
     SRC["<b>CUE schema text</b><br/>constraints · @blob · @meta<br/>compiled once by New()"]:::schema
 
-    SRC --> FAST["<b>fastConstraint</b><br/>scalars only"]:::fast
-    SRC --> CV["<b>CUE schema value</b><br/>structs · arrays"]:::slow
+    SRC --> FAST["<b>fastConstraint</b><br/>scalars · scalar lists"]:::fast
+    SRC --> CV["<b>CUE schema value</b><br/>structs · struct lists"]:::slow
 
     FAST --> L1["<b>Layer 1</b> · constraint check"]:::layer
     CV --> L1
 
-    L1 -->|all fields scalar| Z["<b>Go fast path</b><br/>no cue.Value · 0 alloc"]:::fast
-    L1 -->|struct · array · blob| E["<b>lazy Encode</b><br/>LookupPath · Unify"]:::slow
+    L1 -->|every field has a descriptor| Z["<b>Go fast path</b><br/>no cue.Value · 0 alloc"]:::fast
+    L1 -->|struct · struct list · blob| E["<b>lazy Encode</b><br/>LookupPath · Unify"]:::slow
 
     Z --> L2["<b>Layer 2</b> · @blob + @meta<br/>on the raw Go map"]:::layer
     E --> L2
@@ -196,11 +196,15 @@ All methods are available automatically in `@blob()` expressions — no registra
 
 | Method | Usage | Description |
 |--------|-------|-------------|
-| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | String/slice/map length |
-| `min_len(n)` | `this.s.min_len(n: 3)` | Minimum length |
-| `max_len(n)` | `this.s.max_len(n: 100)` | Maximum length |
+| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | Byte length of a string; element count of a slice/map |
+| `min_len(n)` | `this.s.min_len(n: 3)` | Minimum, same units as `len_between` |
+| `max_len(n)` | `this.s.max_len(n: 100)` | Maximum, same units as `len_between` |
 | `str_len(min,max)` | `this.s.str_len(min:2, max:10)` | Rune count range |
 | `between(min,max)` | `this.age.between(min:0, max:150)` | Numeric range (inclusive) |
+
+> **For a user-facing length limit, reach for `str_len`.** The three `*_len`
+> methods count bytes on a string, so `password.len_between(min: 8, max: 64)`
+> accepts three CJK characters — nine bytes. `str_len` counts runes.
 
 ### Financial
 
@@ -228,33 +232,80 @@ Pre-compile at startup, validate per request with zero compilation overhead:
 
 ```go
 var userSchema = schemix.MustNew(`{
+    // Anything CUE can express belongs in CUE: these stay on the Go-native
+    // fast path, and a violation carries a precise code and the bound it broke.
     username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
-    email:    string @blob(this.email.is_email())
-    password: string @blob(this.password.len_between(min: 8, max: 64))
-    age:      int    @blob(this.age.between(min: 13, max: 150))
+    age:      int & >=13 & <=150
     role:     "admin" | "user" | "guest"
-}`, schemix.WithErrorFormatter(apiFormatter))
+
+    // A rule is for what CUE cannot express. str_len counts runes; len_between
+    // counts bytes, which would let three CJK characters pass as eight.
+    email:    string @blob(this.email.is_email())
+    password: string @blob(this.password.str_len(min: 8, max: 64))
+}`)
 
 func CreateUser(w http.ResponseWriter, req *http.Request) {
-    var body map[string]any
-    json.NewDecoder(req.Body).Decode(&body)
+    raw, err := io.ReadAll(req.Body)
+    if err != nil {
+        respond(w, http.StatusBadRequest, map[string]any{"error": "unreadable_body"})
+        return
+    }
 
-    r := userSchema.ProcessWithMode(body, schemix.FailAll)
+    // Hand ProcessValue the raw bytes so a JSON number reaches an `int` field as
+    // an integer. Decoding into map[string]any first makes every number a
+    // float64, and CUE's `int` rejects a float — see the note below.
+    r := userSchema.ProcessValue(raw) // FailAll: collects every error
     if !r.Valid {
-        status := http.StatusBadRequest
-        if r.HasCode(schemix.CodeRequiredMissing) {
-            status = http.StatusUnprocessableEntity
+        // A body that is not JSON at all fails at the conversion layer. That is
+        // a different problem from a field that broke a rule, and deserves 400.
+        if r.HasCode(schemix.CodeConfigError) {
+            respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
+            return
         }
-        w.WriteHeader(status)
-        json.NewEncoder(w).Encode(map[string]any{
+
+        details := make([]map[string]string, len(r.Errors))
+        for i, e := range r.Errors {
+            details[i] = map[string]string{
+                "field": e.Path,
+                "code":  string(e.Code),
+                // FriendlyMessage() is the user-facing sentence. e.Message holds
+                // raw CUE/Bloblang wording — log it, don't return it.
+                "message": e.FriendlyMessage(),
+            }
+        }
+        respond(w, http.StatusUnprocessableEntity, map[string]any{
             "error":   "validation_failed",
-            "details": r.Errors,
+            "details": details,
         })
         return
     }
-    // use r.Output ...
+
+    respond(w, http.StatusCreated, saveUser(r.Output)) // computed fields included
+}
+
+// respond writes JSON. Content-Type must be set *before* WriteHeader; a header
+// set afterwards is silently discarded.
+func respond(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
 }
 ```
+
+A body that could not be parsed is a `400`; a well-formed body whose contents
+break the schema is a `422`. `HasCode` separates the two.
+
+> **Give `ProcessValue` the bytes, not a decoded map.** `json.Unmarshal` turns
+> every JSON number into a `float64`, and CUE keeps `int` and `float` as sibling
+> types, so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`.
+> `ProcessValue` converts JSON numbers to integers where the value allows it.
+> (`json.Decoder.UseNumber()` does not help — a `json.Number` is a string.)
+
+> **Prefer CUE over `@blob` for anything CUE can state.** `age: int & >=13 & <=150`
+> fails with `E1R01` and `age must be <=150`; the same bound written as
+> `@blob(this.age.between(min: 13, max: 150))` fails with `E2B01` and
+> `age does not satisfy a validation rule`, which tells the caller nothing about
+> how to fix it, and the field loses its fast-path descriptor.
 
 ## Schema Syntax
 
@@ -375,6 +426,15 @@ Useful Bloblang array methods: `all(i -> …)`, `any(i -> …)`, `length()`,
 > element index is unknown until runtime — the attribute would be silently
 > dropped and invalid data would pass. The error names the offending path and the
 > supported rewrite.
+
+> **A list of scalars costs far less than a list of structs.** `[...string]`,
+> `[...int & >0]` and `[..."A" | "B"]` are checked element-by-element in pure Go
+> with no allocation, because one scalar descriptor decides every element. A list
+> of structs has no such descriptor and goes to `cue.Value.Unify` at roughly
+> 6.5 µs per element. Error paths are identical either way — `tags[1]`, one error
+> per offending element. Adding a list-level constraint (`list.MinItems`), a fixed
+> arity (`[string, string]`), or a disjunction of list types moves the field back
+> onto CUE, since none of those reduce to a per-element check.
 
 ## Custom Functions & Methods
 
@@ -800,23 +860,31 @@ Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 430 µs | 796 KiB | 22366 |
+| `New` (compile) | 431 µs | 796 KiB | 22380 |
 | `Process` (valid) | **4.67 µs** | 11.90 KiB | 86 |
 | `Process` (invalid) | 5.59 µs | 13.14 KiB | 102 |
-| `Process` (nested) | 37.35 µs | 45.86 KiB | 492 |
+| `Process` (nested) | 26.51 µs | 42.07 KiB | 420 |
 | `Validate` (no output) | **4.82 µs** | 11.54 KiB | 82 |
 | `Process` (parallel, 10 cores) | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields` (fast path) | 146.5 ns | 0 B | 0 |
+| `ValidateFields` (fast path) | 149.0 ns | 0 B | 0 |
+| `Validate` (3 scalar lists, 1 element each) | **72.9 ns** | 0 B | 0 |
+| `Validate` (3 scalar lists, 10 elements each) | **338 ns** | 0 B | 0 |
 | `Registry.Get` | 6.25 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **175x speedup** over the CUE legacy path (146.5ns vs 25.62µs).
+> achieving about **172x speedup** over the CUE legacy path (149.0ns vs 25.62µs).
 >
 > `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
 > fast path never converts the input into a `cue.Value` at all. That is exactly
 > the 39 allocations missing from every row above compared to earlier releases
-> (`Process` 125 → 86, `Validate` 121 → 82). Nested and array schemas still
-> require the encode, which is why `Process (nested)` is unchanged at 492.
+> (`Process` 125 → 86, `Validate` 121 → 82). A schema containing a struct still
+> requires the encode, which is what `Process (nested)` measures — down from 492
+> to 420 allocations now that field lookup paths are built at compile time rather
+> than parsed on every call.
+>
+> Lists of **scalar** elements are served by the fast path too, allocation-free.
+> Lists of **struct** elements are not; see
+> [the array breakdown](benchmarks/comparison/README.md#arrays-it-depends-on-the-element).
 >
 > Pull requests also run base and head benchmarks on the same CI runner. A statistically
 > significant regression above 5% fails the benchmark gate.
@@ -836,9 +904,9 @@ Apple M4, Go 1.25.11, `benchstat` medians. Time / allocations per operation:
 | Scalar, invalid | **1.06 µs · 15** | 733 ns · 25 | 2.05 µs · 49 | 2.13 µs · 81 | 16.30 µs · 301 |
 | Parallel, 10 cores | **~100 ns · 0** | 247 ns · 6 | — | 785 ns · 56 | — |
 | JSON bytes, end-to-end | 1.69 µs · 31 | 1.50 µs · 14 | 2.52 µs · 45 | 2.82 µs · 80 | — |
-| Nested + 3-item array | 27.35 µs · 432 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
-| With one `@blob()` rule | 6.44 µs · 127 | not supported | not supported | not supported | — |
-| Compile (once at startup) | 43.97 µs | 10.11 µs | — | 65.97 µs | — |
+| Nested + 3-item array | 23.77 µs · 360 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
+| With one `@blob()` rule | 4.82 µs · 91 | not supported | not supported | not supported | — |
+| Compile (once at startup) | 56.59 µs | 10.11 µs | — | 65.97 µs | — |
 
 Capabilities, where the difference is structural rather than a matter of
 nanoseconds:
@@ -859,12 +927,14 @@ is skipped entirely when every field is served by the Go-native fast path.
 
 Two honest boundaries on that headline:
 
-- Add **one `@blob()` rule, a nested struct, or an array** and the input must be
-  encoded into a `cue.Value` — cost jumps by an order of magnitude.
-- **Arrays are the weak spot**: the fast path has no list descriptor, so the whole
-  list goes to `cue.Value.Unify` at ~6.3 µs per element. Validating large
-  collections element-by-element against a per-element `Validator` is
-  [measured 62-82x faster](benchmarks/comparison/README.md#mitigation).
+- Add **one `@blob()` rule or a nested struct** and the input must be encoded
+  into a `cue.Value` — cost jumps by an order of magnitude.
+- **Arrays depend on what the elements are.** A list of scalars —
+  `[...string]`, `[...int & >0]`, `[..."A" | "B"]` — is served entirely by the
+  fast path, allocation-free. A list of **structs** (`[...{…}]`) has no such
+  descriptor, so the whole list goes to `cue.Value.Unify` at ~6.5 µs per element;
+  validating those element-by-element against a per-element `Validator` is
+  [measured 55-76x faster](benchmarks/comparison/README.md#mitigation).
 
 What schemix offers that raw throughput does not cover: the schema is
 hot-loadable text rather than compiled Go, plus computed fields (`@blob()`),

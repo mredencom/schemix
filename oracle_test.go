@@ -101,6 +101,109 @@ func TestOracle_FastPathVsCUE(t *testing.T) {
 		{"excl-min/above", `{ n: int & >0 & <100 }`, map[string]any{"n": int64(1)}},
 		{"excl-max/at-bound", `{ n: int & >0 & <100 }`, map[string]any{"n": int64(100)}},
 		{"excl-max/below", `{ n: int & >0 & <100 }`, map[string]any{"n": int64(99)}},
+
+		// ── Constraints the fast descriptor cannot represent ──────────────────
+		// Each of these carries a conjunct beyond the descriptor's vocabulary.
+		// Dropping it would let invalid data through, so the field must fall
+		// back to CUE rather than be served by an incomplete descriptor.
+
+		// More than one regex: only the first was ever applied.
+		{"multi-regex/second-violated", `{ s: =~"^a" & =~"b$" }`, map[string]any{"s": "ac"}},
+		{"multi-regex/first-violated", `{ s: =~"^a" & =~"b$" }`, map[string]any{"s": "zb"}},
+		{"multi-regex/both-satisfied", `{ s: =~"^a" & =~"b$" }`, map[string]any{"s": "ab"}},
+
+		// Not-equal bounds (cue.NotEqualOp) on strings.
+		{"not-equal-string/violated", `{ s: string & !="root" }`, map[string]any{"s": "root"}},
+		{"not-equal-string/satisfied", `{ s: string & !="root" }`, map[string]any{"s": "user"}},
+		{"not-empty-string/violated", `{ s: string & !="" }`, map[string]any{"s": ""}},
+		{"not-empty-string/satisfied", `{ s: string & !="" }`, map[string]any{"s": "x"}},
+		{"regex-and-not-equal/violated", `{ s: =~"^[a-z]+$" & !="admin" }`, map[string]any{"s": "admin"}},
+		{"regex-and-not-equal/satisfied", `{ s: =~"^[a-z]+$" & !="admin" }`, map[string]any{"s": "guest"}},
+
+		// Not-equal bounds on numbers, mixed with ranges the descriptor does hold.
+		{"not-equal-int/violated", `{ n: int & >0 & !=5 }`, map[string]any{"n": int64(5)}},
+		{"not-equal-int/satisfied", `{ n: int & >0 & !=5 }`, map[string]any{"n": int64(6)}},
+		{"not-equal-float/violated", `{ r: float & >0.0 & !=0.5 }`, map[string]any{"r": 0.5}},
+
+		// CUE builtin calls (cue.CallOp) — invisible to the descriptor.
+		{"minrunes/violated", "import \"strings\"\n{ s: string & strings.MinRunes(3) }", map[string]any{"s": "a"}},
+		{"minrunes/satisfied", "import \"strings\"\n{ s: string & strings.MinRunes(3) }", map[string]any{"s": "abc"}},
+		{"maxrunes/violated", "import \"strings\"\n{ s: string & strings.MaxRunes(3) }", map[string]any{"s": "abcdef"}},
+		{"regex-and-minrunes/violated", "import \"strings\"\n{ s: =~\"^[a-z]+$\" & strings.MinRunes(3) }", map[string]any{"s": "ab"}},
+		{"multipleof/violated", "import \"math\"\n{ n: float & math.MultipleOf(0.5) }", map[string]any{"n": 0.3}},
+		{"multipleof/satisfied", "import \"math\"\n{ n: float & math.MultipleOf(0.5) }", map[string]any{"n": 1.5}},
+
+		// Concrete single values: equality, not a bare type constraint.
+		{"concrete-int/violated", `{ n: 5 }`, map[string]any{"n": int64(7)}},
+		{"concrete-int/satisfied", `{ n: 5 }`, map[string]any{"n": int64(5)}},
+		{"concrete-string/violated", `{ s: "hello" }`, map[string]any{"s": "world"}},
+		{"concrete-string/satisfied", `{ s: "hello" }`, map[string]any{"s": "hello"}},
+		{"concrete-float/violated", `{ r: 1.5 }`, map[string]any{"r": 2.5}},
+		{"concrete-bool/violated", `{ b: true }`, map[string]any{"b": false}},
+
+		// A range conjoined with a concrete value the descriptor would ignore.
+		{"range-and-concrete/violated", `{ n: int & >=0 & <=10 & 7 }`, map[string]any{"n": int64(3)}},
+
+		// ── Lists whose elements are scalars ─────────────────────────────────
+		{"list-string/valid", `{ tags: [...string] }`, map[string]any{"tags": []any{"a", "b"}}},
+		{"list-string/empty", `{ tags: [...string] }`, map[string]any{"tags": []any{}}},
+		{"list-string/first-violated", `{ tags: [...string] }`, map[string]any{"tags": []any{int64(1), "b"}}},
+		{"list-string/all-violated", `{ tags: [...string] }`, map[string]any{"tags": []any{int64(1), int64(2)}}},
+		{"list-string/nil-element", `{ tags: [...string] }`, map[string]any{"tags": []any{nil}}},
+		{"list-string/not-a-list", `{ tags: [...string] }`, map[string]any{"tags": "nope"}},
+		{"list-string/typed-slice", `{ tags: [...string] }`, map[string]any{"tags": []string{"a", "b"}}},
+		{"list-regex/valid", `{ p: [...=~"^[0-9]{2}$"] }`, map[string]any{"p": []any{"12", "34"}}},
+		{"list-regex/violated", `{ p: [...=~"^[0-9]{2}$"] }`, map[string]any{"p": []any{"12", "abc"}}},
+		{"list-int-range/valid", `{ n: [...int & >0] }`, map[string]any{"n": []any{int64(1), int64(2)}}},
+		{"list-int-range/violated", `{ n: [...int & >0] }`, map[string]any{"n": []any{int64(1), int64(-1)}}},
+		{"list-int-range/uint-element", `{ n: [...int & >0] }`, map[string]any{"n": []any{uint64(5)}}},
+		{"list-enum/valid", `{ c: [..."a" | "b"] }`, map[string]any{"c": []any{"a", "b"}}},
+		{"list-enum/violated", `{ c: [..."a" | "b"] }`, map[string]any{"c": []any{"z"}}},
+		{"list-bool/violated", `{ b: [...bool] }`, map[string]any{"b": []any{true, "yes"}}},
+		{"list-float/violated", `{ r: [...float & <=1.0] }`, map[string]any{"r": []any{0.5, 2.0}}},
+
+		// Shapes the descriptor must refuse, so CUE keeps deciding. A list-level
+		// conjunct, a fixed-position element, or a disjunction of two list types
+		// all evaluate differently from a plain open list of scalars.
+		{"list-minitems/violated", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", map[string]any{"tags": []any{"a"}}},
+		{"list-minitems/satisfied", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", map[string]any{"tags": []any{"a", "b"}}},
+		{"list-tuple/valid", `{ p: [string, string] }`, map[string]any{"p": []any{"a", "b"}}},
+		{"list-tuple/wrong-arity", `{ p: [string, string] }`, map[string]any{"p": []any{"a"}}},
+		{"list-half-open/valid", `{ p: [string, ...int] }`, map[string]any{"p": []any{"a", int64(1)}}},
+		{"list-half-open/violated", `{ p: [string, ...int] }`, map[string]any{"p": []any{int64(1), int64(2)}}},
+		{"list-disjunction/int-branch", `{ tags: [...string] | [...int] }`, map[string]any{"tags": []any{int64(1)}}},
+		{"list-disjunction/string-branch", `{ tags: [...string] | [...int] }`, map[string]any{"tags": []any{"a"}}},
+		{"list-struct-element/valid", `{ items: [...{qty: int}] }`, map[string]any{"items": []any{map[string]any{"qty": int64(1)}}}},
+		{"list-nested-list", `{ m: [...[...string]] }`, map[string]any{"m": []any{[]any{"a"}}}},
+
+		// ── int is not a float ───────────────────────────────────────────────
+		// CUE keeps int and float as sibling subtypes of number: `float` rejects
+		// an integer value, while `number` accepts either.
+		{"float-bare/int-value", `{ r: float }`, map[string]any{"r": int64(50)}},
+		{"float-bare/float-value", `{ r: float }`, map[string]any{"r": 50.0}},
+		{"float-range/int-value", `{ r: float & >=0.0 & <=100.0 }`, map[string]any{"r": int64(50)}},
+		{"float-range/float-value", `{ r: float & >=0.0 & <=100.0 }`, map[string]any{"r": 50.5}},
+		{"float-enum/int-value", `{ r: 0.5 | 1.0 | 2.0 }`, map[string]any{"r": int64(2)}},
+		{"float-list/int-value", `{ r: [...float] }`, map[string]any{"r": []any{int64(1)}}},
+		{"float-list/float-value", `{ r: [...float] }`, map[string]any{"r": []any{1.5, 2.5}}},
+		{"float-range-list/int-value", `{ r: [...float & >0.0] }`, map[string]any{"r": []any{int64(1)}}},
+		{"number-bare/int-value", `{ n: number }`, map[string]any{"n": int64(50)}},
+		{"number-range/int-value", `{ n: number & >=0 }`, map[string]any{"n": int64(50)}},
+		{"number-list/int-value", `{ n: [...number] }`, map[string]any{"n": []any{int64(1), 2.5}}},
+
+		// ── Default markers ─────────────────────────────────────────────────
+		// `*d | T` is a disjunction. Eval() collapses it to the default branch,
+		// hiding the alternatives from every extractor, so the constraints on
+		// those branches would be dropped.
+		{"default-int-range/violated", `{ n: *10 | int & >=0 }`, map[string]any{"n": int64(-1)}},
+		{"default-int-range/satisfied", `{ n: *10 | int & >=0 }`, map[string]any{"n": int64(7)}},
+		{"default-int-two-bounds/violated", `{ n: *50 | int & >0 & <100 }`, map[string]any{"n": int64(0)}},
+		{"default-string-regex/violated", `{ s: *"hello" | =~"^[a-z]+$" }`, map[string]any{"s": "123"}},
+		{"default-string-regex/satisfied", `{ s: *"hello" | =~"^[a-z]+$" }`, map[string]any{"s": "abc"}},
+		{"default-plain-int/negative", `{ n: *10 | int }`, map[string]any{"n": int64(-1)}},
+		{"default-enum/violated", `{ c: *"USD" | "CNY" | "EUR" }`, map[string]any{"c": "XXX"}},
+		{"default-enum/satisfied", `{ c: *"USD" | "CNY" | "EUR" }`, map[string]any{"c": "CNY"}},
+		{"default-list/violated", `{ tags: *["a"] | [...string] }`, map[string]any{"tags": []any{int64(1)}}},
 	}
 
 	fastOnlyGuards := map[string]bool{
@@ -150,5 +253,66 @@ func disableFastPath(fields []cueField) {
 		if len(fields[i].children) > 0 {
 			disableFastPath(fields[i].children)
 		}
+	}
+}
+
+// TestOracle_FastPathStillCoversSupportedConstraints pins the constraint
+// vocabulary the fast descriptor must keep serving. Rejecting an unrepresentable
+// conjunct is a correctness requirement, but over-rejecting would silently push
+// the documented scalar schemas back onto CUE and erase the headline benchmark.
+//
+// ObserveFastpathDecision fires only for a field that holds a descriptor, so its
+// absence means extractFastConstraint returned nil.
+func TestOracle_FastPathStillCoversSupportedConstraints(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		field  string
+		input  map[string]any
+	}{
+		{"bare-string", `{ s: string }`, "s", map[string]any{"s": "x"}},
+		{"bare-int", `{ n: int }`, "n", map[string]any{"n": int64(1)}},
+		{"bare-float", `{ r: float }`, "r", map[string]any{"r": 1.5}},
+		{"bare-number", `{ n: number }`, "n", map[string]any{"n": int64(1)}},
+		{"bare-bool", `{ b: bool }`, "b", map[string]any{"b": true}},
+		{"regex-only", `{ p: =~"^[0-9]{4}$" }`, "p", map[string]any{"p": "1234"}},
+		{"string-and-regex", `{ s: string & =~"^[a-z]+$" }`, "s", map[string]any{"s": "abc"}},
+		{"int-range-both", `{ n: int & >=0 & <=150 }`, "n", map[string]any{"n": int64(30)}},
+		{"int-range-min-only", `{ n: int & >0 }`, "n", map[string]any{"n": int64(30)}},
+		{"int-range-exclusive", `{ n: int & >0 & <100 }`, "n", map[string]any{"n": int64(30)}},
+		{"float-range", `{ r: float & >=0.0 & <=1.0 }`, "r", map[string]any{"r": 0.5}},
+		{"string-enum", `{ c: "CNY" | "USD" | "EUR" }`, "c", map[string]any{"c": "USD"}},
+		{"int-enum", `{ n: 1 | 2 | 3 }`, "n", map[string]any{"n": int64(2)}},
+		{"float-enum", `{ r: 0.5 | 1.0 }`, "r", map[string]any{"r": 1.0}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v := MustNew(tc.schema, WithMetricsRecorder(rec))
+
+			r := v.Process(tc.input)
+			if !r.Valid {
+				t.Fatalf("expected valid input to pass, got errors=%v", r.Errors)
+			}
+
+			rec.mu.Lock()
+			calls := append([]fastpathObservation(nil), rec.fastpathCalls...)
+			rec.mu.Unlock()
+
+			var served bool
+			for _, c := range calls {
+				if c.fieldPath == tc.field {
+					if !c.hit {
+						t.Fatalf("field %q held a descriptor but did not handle the value", tc.field)
+					}
+					served = true
+				}
+			}
+			if !served {
+				t.Fatalf("field %q lost its fast descriptor; %q must stay on the fast path",
+					tc.field, tc.schema)
+			}
+		})
 	}
 }

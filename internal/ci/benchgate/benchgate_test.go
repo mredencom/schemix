@@ -1,6 +1,7 @@
 package benchgate
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,10 +27,11 @@ ProcessValid-8,61,0%,61,0%,~,p=1.000 n=6
 `
 
 func TestParseAndCheckRealBenchstatCSV(t *testing.T) {
-	regressions, err := parseAndCheck(strings.NewReader(realBenchstatCSV), 5)
+	result, err := parseAndCheck(strings.NewReader(realBenchstatCSV), 5)
 	if err != nil {
 		t.Fatalf("parseAndCheck: %v", err)
 	}
+	regressions := result.Regressions
 	if len(regressions) != 2 {
 		t.Fatalf("regressions = %d, want 2: %+v", len(regressions), regressions)
 	}
@@ -41,6 +43,69 @@ func TestParseAndCheckRealBenchstatCSV(t *testing.T) {
 	}
 	if regressions[0].ChangePercent != 6.12 || regressions[0].PValue != 0.01 {
 		t.Errorf("first regression values = %+v", regressions[0])
+	}
+}
+
+// benchstatCSVWithOneSidedBenchmarks is real `benchstat -format=csv` output for
+// a pair of runs where head added one benchmark and dropped another.
+//
+// For a benchmark present in only one input, benchstat omits the comparison
+// columns rather than leaving them empty, producing a shorter record: three
+// fields when only base has it, five when only head does. Adding a benchmark in
+// a pull request is routine, so the gate must not treat either as malformed.
+const benchstatCSVWithOneSidedBenchmarks = `goos: linux
+goarch: amd64
+pkg: example
+cpu: Example CPU
+,base,,head,,,
+,sec/op,CI,sec/op,CI,vs base,P
+Shared-4,1.0e-06,1%,1.08e-06,1%,+8.00%,p=0.002 n=6
+Dropped-4,2.005e-06,∞
+Added-4,,,2.105e-07,∞
+geomean,1.4e-06,,4.6e-07,,+0.50%,
+
+,base,,head,,,
+,allocs/op,CI,allocs/op,CI,vs base,P
+Shared-4,61,0%,61,0%,~,p=1.000 n=6
+Added-4,,,0,∞
+`
+
+func TestParseAndCheckOneSidedBenchmarks(t *testing.T) {
+	result, err := parseAndCheck(strings.NewReader(benchstatCSVWithOneSidedBenchmarks), 5)
+	if err != nil {
+		t.Fatalf("a benchmark present in only one input must not fail the parse: %v", err)
+	}
+
+	if len(result.Regressions) != 1 {
+		t.Fatalf("regressions = %d, want 1: %+v", len(result.Regressions), result.Regressions)
+	}
+	if got := result.Regressions[0]; got.Name != "Shared-4" || got.ChangePercent != 8 {
+		t.Errorf("regression = %+v, want Shared-4 +8%%", got)
+	}
+
+	// Every one-sided row is reported, per metric section, so a benchmark that
+	// escaped the gate is visible rather than silently skipped.
+	want := []string{
+		"Dropped-4 sec/op",
+		"Added-4 sec/op",
+		"Added-4 allocs/op",
+	}
+	if !slices.Equal(result.Incomparable, want) {
+		t.Errorf("incomparable = %v, want %v", result.Incomparable, want)
+	}
+}
+
+// A comparison where nothing lines up is not a pass — it means the two runs
+// shared no benchmark at all, and the gate has judged nothing.
+func TestParseAndCheckAllRowsOneSided(t *testing.T) {
+	const csv = `goos: linux
+,base,,head,,,
+,sec/op,CI,sec/op,CI,vs base,P
+OnlyBase-4,1.0e-06,∞
+OnlyHead-4,,,2.0e-06,∞
+`
+	if _, err := parseAndCheck(strings.NewReader(csv), 5); err == nil {
+		t.Fatal("want an error when no benchmark could be compared")
 	}
 }
 
@@ -61,10 +126,11 @@ func TestParseAndCheckThresholdAndSignificance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input := comparisonCSV(tt.change, tt.pValue)
-			regressions, err := parseAndCheck(strings.NewReader(input), 5)
+			result, err := parseAndCheck(strings.NewReader(input), 5)
 			if err != nil {
 				t.Fatalf("parseAndCheck: %v", err)
 			}
+			regressions := result.Regressions
 			if got := len(regressions) == 1; got != tt.regression {
 				t.Fatalf("regression=%v, want %v; rows=%+v", got, tt.regression, regressions)
 			}
@@ -78,10 +144,11 @@ func TestParseAndCheckSkipsUnmatchedBenchmark(t *testing.T) {
 OnlyInHead-8,,,,,,
 Comparable-8,1,0%,1,0%,~,p=1.000 n=6
 `
-	regressions, err := parseAndCheck(strings.NewReader(input), 5)
+	result, err := parseAndCheck(strings.NewReader(input), 5)
 	if err != nil {
 		t.Fatalf("parseAndCheck: %v", err)
 	}
+	regressions := result.Regressions
 	if len(regressions) != 0 {
 		t.Fatalf("regressions = %+v, want none", regressions)
 	}

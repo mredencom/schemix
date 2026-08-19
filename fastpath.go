@@ -18,6 +18,7 @@ const (
 	constraintRegex                       // string + regex match
 	constraintRange                       // numeric range bounds
 	constraintEnum                        // string/int enum set
+	constraintList                        // open list, every element checked by elem
 )
 
 // fastConstraint holds pre-extracted Go-native constraint data for a single field.
@@ -46,18 +47,59 @@ type fastConstraint struct {
 	minExcl  bool    // true = > (exclusive), false = >= (inclusive)
 	maxExcl  bool    // true = < (exclusive), false = <= (inclusive)
 
-	// Enum constraint
+	// Enum constraint. The slices are the source of truth for the candidate
+	// listing in an error message, which must follow declaration order.
 	stringEnums []string
 	intEnums    []int64
 	floatEnums  []float64
+
+	// Membership sets, built only for enums large enough that a hash lookup beats
+	// a scan — see enumSetThreshold. Nil means scan the slice.
+	stringEnumSet map[string]struct{}
+	intEnumSet    map[int64]struct{}
+
+	// List constraint: the descriptor every element must satisfy (constraintList).
+	elem *fastConstraint
 }
+
+// enumSetThreshold is the candidate count at which a hash lookup starts beating
+// a linear scan. Measured with the value already boxed in an any, as it arrives
+// at runtime, and the hit at the average (middle) position:
+//
+//	n      linear      map
+//	3      3.1 ns     5.5 ns
+//	5      4.3 ns     5.5 ns
+//	8      7.4 ns     5.5 ns
+//	16    12.4 ns     4.8 ns
+//	50    39.2 ns     5.5 ns
+//	180  158.2 ns     5.6 ns
+//
+// Below it the scan wins, and most enums are small — currencies, statuses,
+// roles — so the set is built only where it pays for itself.
+const enumSetThreshold = 8
 
 // extractFastConstraint analyzes a CUE field schema at compile time and
 // attempts to extract a pure-Go constraint descriptor. Returns nil if
 // the field has complex constraints that require CUE evaluation.
+//
+// The descriptor's vocabulary is deliberately narrow: bare types, one regex,
+// numeric ranges, and literal enums. Every extractor below is therefore
+// *exhaustive* — it inspects each conjunct in the expression tree and returns
+// nil the moment it meets one it cannot represent. Serving a field from a
+// descriptor that silently omits a conjunct would let invalid data pass, so an
+// unrepresentable constraint must fall back to CUE (fail closed).
 func extractFastConstraint(schema cue.Value) *fastConstraint {
 	// Eval() resolves definition references (e.g. #PAN → =~"^[0-9]{16}$")
+	raw := schema
 	schema = schema.Eval()
+
+	// Eval() also collapses a disjunction to its default branch, which hides the
+	// alternatives from every extractor below: `*10 | int & >=0` arrives looking
+	// like a bare `int`, with the >=0 sitting on a branch no longer visible.
+	if hasHiddenDisjunctionBranches(schema, raw) {
+		return nil
+	}
+
 	kind := schema.IncompleteKind()
 
 	switch kind {
@@ -70,11 +112,128 @@ func extractFastConstraint(schema cue.Value) *fastConstraint {
 	case cue.NumberKind:
 		return extractNumberConstraint(schema)
 	case cue.BoolKind:
+		if !isBareType(schema) {
+			// A concrete `true`/`false` is an equality constraint, not a type.
+			return nil
+		}
 		return &fastConstraint{kind: constraintType, expectBool: true}
+	case cue.ListKind:
+		return extractListConstraint(schema, raw)
 	default:
-		// struct, list, or complex — no fast path
+		// struct or complex — no fast path
 		return nil
 	}
+}
+
+// hasHiddenDisjunctionBranches reports whether Eval() collapsed a disjunction of
+// non-concrete types down to its first branch, which would leave the extractors
+// reasoning about one alternative as though it were the whole constraint:
+// `[...string] | [...int]` arrives looking exactly like `[...string]`, so a list
+// of ints would be rejected against a schema that accepts it.
+//
+// A disjunction of concrete literals survives — `"CNY" | "USD"` keeps its OrOp —
+// which is what enum extraction reads, so those still take the fast path.
+//
+// The other way CUE hides a branch, a folded default marker, reports no OrOp at
+// all and is caught by noOpWrapsConstraint instead.
+func hasHiddenDisjunctionBranches(evaluated, raw cue.Value) bool {
+	if rawOp, _ := raw.Expr(); rawOp != cue.OrOp {
+		return false
+	}
+	evalOp, _ := evaluated.Expr()
+	return evalOp != cue.OrOp
+}
+
+// noOpWrapsConstraint reports whether a NoOp expression is only a wrapper around
+// a constraint one level down.
+//
+// A default marker folds its disjunction away entirely: `*10 | int & >=0` reports
+// NoOp at the top with `int & >=0` as its single operand, and `*"hi" | =~"^a"`
+// reports NoOp wrapping the regex. Reading only the top level would take either
+// for a bare type and drop the constraint.
+//
+// An unadorned type or open list wraps nothing — `string`, `int`, `[...string]`
+// and `[...int & >0]` all report NoOp inside NoOp — so they are unaffected.
+// cue.Value.Default() cannot be used to make this distinction: an open list
+// defaults to the empty list and so reports a default of its own.
+func noOpWrapsConstraint(v cue.Value) bool {
+	op, vals := v.Expr()
+	if op != cue.NoOp || len(vals) != 1 {
+		return false
+	}
+	innerOp, _ := vals[0].Expr()
+	return innerOp != cue.NoOp
+}
+
+// extractListConstraint handles an open list whose verdict reduces to checking
+// every element against one scalar descriptor, e.g. [...string] or [...int & >0].
+//
+// Returns nil for any other list shape, because their verdicts do not reduce
+// that way:
+//
+//   - `[...string] & list.MinItems(2)` — a list-level conjunct.
+//   - `[string, string]` — fixed arity; a wrong length is an error in itself.
+//   - `[string, ...int]` — the head element has its own constraint.
+//   - `[...string] | [...int]` — either branch may match, so no single element
+//     descriptor decides the list.
+//   - `[...{…}]` — struct elements.
+//   - `[...[...string]]` — nested lists; see the elem.kind check below.
+//
+// evaluated has definition references resolved, raw has not. Both are needed:
+// Eval() flattens a disjunction of list types down to its first branch, so
+// `[...string] | [...int]` arrives here looking exactly like `[...string]`, and
+// only raw still carries the OrOp that must disqualify it.
+func extractListConstraint(evaluated, raw cue.Value) *fastConstraint {
+	// Any conjunct or disjunct at the list level puts the verdict beyond a
+	// per-element check.
+	if op, _ := raw.Expr(); op != cue.NoOp {
+		return nil
+	}
+	if op, _ := evaluated.Expr(); op != cue.NoOp {
+		return nil
+	}
+
+	// A fixed-position element means arity matters, or that element carries its
+	// own constraint. Either way this is not a uniform open list.
+	iter, err := evaluated.List()
+	if err != nil || iter.Next() {
+		return nil
+	}
+
+	elemSchema := evaluated.LookupPath(cue.MakePath(cue.AnyIndex))
+	if !elemSchema.Exists() {
+		return nil
+	}
+
+	elem := extractFastConstraint(elemSchema)
+	if elem == nil {
+		return nil
+	}
+	if elem.kind == constraintList {
+		// A nested list would need a compound index such as m[0][1], but
+		// fastElemFailure carries a single index, so the inner one would be lost
+		// and the reported path would point at the wrong element.
+		return nil
+	}
+	return &fastConstraint{kind: constraintList, elem: elem}
+}
+
+// isBareType reports whether v is an unadorned type declaration such as
+// `string` or `int`, carrying neither a concrete value nor any conjunct.
+//
+// Three things matter. A non-NoOp expression means conjuncts the caller has not
+// accounted for; a concrete value means equality, which no descriptor kind
+// expresses; and a NoOp may still wrap a constraint one level down, which is how
+// CUE represents a folded default marker. Any of them puts the field on the CUE
+// path.
+func isBareType(v cue.Value) bool {
+	if op, _ := v.Expr(); op != cue.NoOp {
+		return false
+	}
+	if v.IsConcrete() {
+		return false
+	}
+	return !noOpWrapsConstraint(v)
 }
 
 // extractStringConstraint handles string fields: pure string, regex, or enum.
@@ -82,23 +241,83 @@ func extractStringConstraint(schema cue.Value) *fastConstraint {
 	// Check for enum (disjunction of string literals)
 	if enums := extractStringEnums(schema); enums != nil {
 		return &fastConstraint{
-			kind:         constraintEnum,
-			expectString: true,
-			stringEnums:  enums,
+			kind:          constraintEnum,
+			expectString:  true,
+			stringEnums:   enums,
+			stringEnumSet: newStringEnumSet(enums),
 		}
 	}
 
-	// Check for regex bound (=~"pattern")
-	if re := extractRegex(schema); re != nil {
+	re, exhaustive := scanStringConjuncts(schema)
+	if !exhaustive {
+		return nil
+	}
+	if re != nil {
 		return &fastConstraint{
 			kind:         constraintRegex,
 			expectString: true,
 			regex:        re,
 		}
 	}
-
-	// Pure string type check
 	return &fastConstraint{kind: constraintType, expectString: true}
+}
+
+// scanStringConjuncts walks a string field's expression tree and reports the
+// single regex it carries, if any.
+//
+// exhaustive is false when the tree holds anything the descriptor cannot
+// express: a second regex (only one can be stored), a `!=` bound, a builtin
+// call such as strings.MinRunes, a disjunction, or a concrete literal.
+func scanStringConjuncts(v cue.Value) (re *regexp.Regexp, exhaustive bool) {
+	op, vals := v.Expr()
+	switch op {
+	case cue.NoOp:
+		if v.IsConcrete() {
+			// A concrete `"hello"` constrains by equality, not by type.
+			return nil, false
+		}
+		if noOpWrapsConstraint(v) {
+			// A folded default marker: `*"hi" | =~"^[a-z]+$"` reports NoOp with
+			// the regex hidden one level down.
+			return nil, false
+		}
+		return nil, true
+
+	case cue.RegexMatchOp:
+		if len(vals) < 1 {
+			return nil, false
+		}
+		pattern, err := vals[0].String()
+		if err != nil {
+			return nil, false
+		}
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, false
+		}
+		return compiled, true
+
+	case cue.AndOp:
+		for _, sub := range vals {
+			subRe, ok := scanStringConjuncts(sub)
+			if !ok {
+				return nil, false
+			}
+			if subRe == nil {
+				continue
+			}
+			if re != nil {
+				// Two patterns must both hold; the descriptor stores one.
+				return nil, false
+			}
+			re = subRe
+		}
+		return re, true
+
+	default:
+		// NotEqualOp, CallOp, OrOp, … — outside the descriptor's vocabulary.
+		return nil, false
+	}
 }
 
 // extractIntConstraint handles int fields: pure int, range, or enum.
@@ -106,9 +325,10 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 	// Check for enum (disjunction of int literals)
 	if enums := extractIntEnums(schema); enums != nil {
 		return &fastConstraint{
-			kind:      constraintEnum,
-			expectInt: true,
-			intEnums:  enums,
+			kind:       constraintEnum,
+			expectInt:  true,
+			intEnums:   enums,
+			intEnumSet: newIntEnumSet(enums),
 		}
 	}
 
@@ -117,7 +337,10 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 		return fc
 	}
 
-	// Pure int type check
+	// No range extracted: only a bare `int` may be served as a type check.
+	if !isBareType(schema) {
+		return nil
+	}
 	return &fastConstraint{kind: constraintType, expectInt: true}
 }
 
@@ -134,6 +357,9 @@ func extractFloatConstraint(schema cue.Value) *fastConstraint {
 	if fc := extractNumericRange(schema, false); fc != nil {
 		return fc
 	}
+	if !isBareType(schema) {
+		return nil
+	}
 	return &fastConstraint{kind: constraintType, expectFloat: true}
 }
 
@@ -144,7 +370,7 @@ func extractNumberConstraint(schema cue.Value) *fastConstraint {
 		fc.expectNumber = true
 		return fc
 	}
-	if op, _ := schema.Expr(); op != cue.NoOp {
+	if !isBareType(schema) {
 		// A constrained number that cannot be represented exactly by the fast
 		// descriptor must remain on the CUE correctness path.
 		return nil
@@ -218,41 +444,15 @@ func extractFloatEnums(v cue.Value) []float64 {
 	return enums
 }
 
-// extractRegex tries to extract a regex pattern from a bound expression (=~"pattern").
-func extractRegex(v cue.Value) *regexp.Regexp {
-	op, vals := v.Expr()
-
-	// Direct bound: =~"pattern" — op is RegexMatchOp, vals[0] is the pattern string
-	if op == cue.RegexMatchOp && len(vals) >= 1 {
-		pattern, err := vals[0].String()
-		if err != nil {
-			return nil
-		}
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil
-		}
-		return re
-	}
-
-	// Conjunction: string & =~"pattern" (less common, but possible)
-	if op == cue.AndOp {
-		for _, sub := range vals {
-			if re := extractRegex(sub); re != nil {
-				return re
-			}
-		}
-	}
-
-	return nil
-}
-
 // extractNumericRange tries to extract range bounds from an int/float field.
 // e.g. int & >0 & <=100
 // CUE Expr structure for "int & >=0 & <=150":
 //
 //	Top: AndOp, vals = [int&>=0 (nested And), <=150 (LessThanEqualOp)]
 //	Each bound op has subVals[0] as the bound value.
+//
+// Returns nil unless every conjunct in the tree is a bound the descriptor can
+// hold, so a schema like `int & >0 & !=5` stays on the CUE path.
 func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 	op, vals := v.Expr()
 
@@ -275,8 +475,11 @@ func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 }
 
 // extractBoundsRecursive traverses the expression tree to find all bound operators.
-// exact is false when an integer bound cannot be represented as int64, which
-// disables the fast path so CUE remains the correctness oracle.
+//
+// exact is false whenever a conjunct cannot be represented exactly: an integer
+// bound outside int64, or any operator outside the four comparisons — `!=`, a
+// builtin call such as math.MultipleOf, a nested disjunction, or a concrete
+// literal. In every such case CUE remains the correctness oracle.
 func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exact bool) {
 	for _, sub := range vals {
 		subOp, subVals := sub.Expr()
@@ -295,6 +498,14 @@ func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exa
 				return hasBound || nestedBound, false
 			}
 			hasBound = hasBound || nestedBound
+		case cue.NoOp:
+			// The bare `int` / `float` / `number` the bounds are conjoined with.
+			// A concrete literal here is an equality the bounds do not capture.
+			if sub.IsConcrete() {
+				return hasBound, false
+			}
+		default:
+			return hasBound, false
 		}
 	}
 	return hasBound, true
@@ -365,6 +576,21 @@ type fastResult struct {
 	Suggestion string
 }
 
+// fastElemFailure describes one rejected element of a list, carrying the index
+// the error path needs.
+//
+// List failures are returned separately by validateFastElements rather than as a
+// field on fastResult: a slice header there grew the struct from 56 to 80 bytes,
+// and since fastResult is returned by value for every scalar field of every
+// validation, that cost 6% on the scalar fast path — measurable, and paid by
+// schemas containing no list at all.
+type fastElemFailure struct {
+	Index      int
+	Code       ErrorCode
+	Detail     string
+	Suggestion string
+}
+
 // fallbackToCUE signals that the fast path cannot precisely evaluate this
 // value (e.g. an unsigned integer or other representation outside its
 // supported set) and the caller must fall through to the CUE Unify path.
@@ -405,9 +631,59 @@ func validateFast(fc *fastConstraint, val any) fastResult {
 		return validateFastRange(fc, val)
 	case constraintEnum:
 		return validateFastEnum(fc, val)
+	case constraintList:
+		// A list can reject several elements at once, which a single fastResult
+		// cannot express; validateFastElements is the entry point for it. Handing
+		// the value back to CUE is the safe answer if anything reaches here.
+		return fallbackToCUE()
 	default:
 		return pass() // should not reach here
 	}
+}
+
+// validateFastElements checks every element of a list against fc.elem and
+// returns one failure per rejected element, in index order. CUE reports every
+// offending element rather than stopping at the first, so this does too.
+//
+// handled=false means the caller must fall through to CUE Unify, exactly as
+// fastResult.Handled=false does for a scalar. failures is nil when the list is
+// valid, which is the common case and stays allocation-free.
+//
+// Only []any is served. A concretely typed slice such as []string would need a
+// reflect-based walk, and CUE already handles it correctly, so it falls back
+// rather than grow a second code path.
+//
+// If any single element cannot be decided — an unsigned integer, say — the whole
+// list falls back. Accepting the elements the descriptor happens to understand
+// while ignoring one it does not would be the same fail-open bug the scalar
+// descriptors were fixed for.
+func validateFastElements(fc *fastConstraint, val any) (failures []fastElemFailure, handled bool) {
+	items, ok := val.([]any)
+	if !ok {
+		// Not a list at all, or a typed slice. CUE decides.
+		return nil, false
+	}
+
+	for i, item := range items {
+		er := validateFast(fc.elem, item)
+		if !er.Handled {
+			return nil, false
+		}
+		if er.Valid {
+			continue
+		}
+		if failures == nil {
+			// Most lists are valid; allocate only once a rejection is certain.
+			failures = make([]fastElemFailure, 0, len(items)-i)
+		}
+		failures = append(failures, fastElemFailure{
+			Index:      i,
+			Code:       er.Code,
+			Detail:     er.Detail,
+			Suggestion: er.Suggestion,
+		})
+	}
+	return failures, true
 }
 
 func validateFastType(fc *fastConstraint, val any) fastResult {
@@ -447,17 +723,32 @@ func validateFastIntType(val any) fastResult {
 }
 
 // validateFastFloatType validates float type with NaN/Inf rejection.
+//
+// An integer value does not satisfy `float`. CUE keeps int and float as sibling
+// subtypes of number, so `r: float` rejects 50 and accepts 50.0; a field meant to
+// take either must be declared `number`.
 func validateFastFloatType(val any) fastResult {
 	switch v := val.(type) {
 	case float64:
 		return validateFiniteFloat(v, val, "float")
 	case float32:
 		return validateFiniteFloat(float64(v), val, "float")
-	case int, int8, int16, int32, int64:
-		return pass() // int is valid for float
 	default:
 		return fail(CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val))
 	}
+}
+
+// rejectIntOnFloat guards the shared numeric paths, which serve both `float` and
+// `number` descriptors, against accepting an integer where CUE would not.
+func rejectIntOnFloat(fc *fastConstraint, val any) (fastResult, bool) {
+	if !fc.expectFloat {
+		return fastResult{}, false
+	}
+	switch val.(type) {
+	case int, int8, int16, int32, int64:
+		return fail(CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val)), true
+	}
+	return fastResult{}, false
 }
 
 // validateFastNumberType validates number (int or float) with NaN/Inf rejection.
@@ -508,6 +799,10 @@ func validateFastRange(fc *fastConstraint, val any) fastResult {
 			// Unsigned integers and unknown numeric representations fall back to CUE.
 			return fallbackToCUE()
 		}
+	}
+
+	if fr, rejected := rejectIntOnFloat(fc, val); rejected {
+		return fr
 	}
 
 	n, ok := toFloat64(val)
@@ -563,17 +858,54 @@ func validateFastInt64Range(fc *fastConstraint, n int64) fastResult {
 	return pass()
 }
 
+// newStringEnumSet returns a membership set, or nil when the candidate list is
+// short enough that scanning it is faster. See enumSetThreshold.
+func newStringEnumSet(enums []string) map[string]struct{} {
+	if len(enums) < enumSetThreshold {
+		return nil
+	}
+	set := make(map[string]struct{}, len(enums))
+	for _, e := range enums {
+		set[e] = struct{}{}
+	}
+	return set
+}
+
+// newIntEnumSet is newStringEnumSet for int candidates.
+//
+// There is no float counterpart: a float enum is rare enough that no measurement
+// justifies the extra state, and equality on float64 is delicate enough not to
+// touch without one.
+func newIntEnumSet(enums []int64) map[int64]struct{} {
+	if len(enums) < enumSetThreshold {
+		return nil
+	}
+	set := make(map[int64]struct{}, len(enums))
+	for _, e := range enums {
+		set[e] = struct{}{}
+	}
+	return set
+}
+
 func validateFastEnum(fc *fastConstraint, val any) fastResult {
 	if fc.stringEnums != nil {
 		s, ok := val.(string)
 		if !ok {
 			return fail(CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val))
 		}
-		for _, e := range fc.stringEnums {
-			if s == e {
+		if fc.stringEnumSet != nil {
+			if _, hit := fc.stringEnumSet[s]; hit {
 				return pass()
 			}
+		} else {
+			for _, e := range fc.stringEnums {
+				if s == e {
+					return pass()
+				}
+			}
 		}
+		// The listing comes from the ordered slice, never from the set, so the
+		// message reads in the order the schema declared.
 		return failEnum(
 			stringEnumDetail(s, fc.stringEnums),
 			suggestClosest(s, fc.stringEnums),
@@ -592,15 +924,24 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 			return fallbackToCUE()
 		}
 		n, _ := toInt64(val)
-		for _, e := range fc.intEnums {
-			if n == e {
+		if fc.intEnumSet != nil {
+			if _, hit := fc.intEnumSet[n]; hit {
 				return pass()
+			}
+		} else {
+			for _, e := range fc.intEnums {
+				if n == e {
+					return pass()
+				}
 			}
 		}
 		return failEnum(int64EnumDetail(n, fc.intEnums), "")
 	}
 
 	if fc.floatEnums != nil {
+		if fr, rejected := rejectIntOnFloat(fc, val); rejected {
+			return fr
+		}
 		n, ok := toFloat64(val)
 		if !ok {
 			return fail(CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val))

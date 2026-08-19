@@ -3,7 +3,10 @@ package schemix_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 
 	"github.com/mredencom/schemix"
 )
@@ -119,40 +122,97 @@ func ExampleProcessStruct() {
 	// valid: true
 }
 
-// A realistic HTTP handler: compile the schema once at startup, then validate
-// per request with no compilation cost. Error codes map cleanly onto statuses.
-func ExampleValidator_ProcessWithMode_httpHandler() {
+// A realistic HTTP handler, mirroring the README's API Validation section so
+// that section cannot drift from working code.
+//
+// Three choices in here are deliberate:
+//
+//   - Constraints CUE can state are written in CUE. They keep their fast-path
+//     descriptor, and a violation names the bound it broke (E1R01, "must be
+//     <=150") instead of the shrug @blob gives (E2B01, "does not satisfy a
+//     validation rule").
+//   - ProcessValue receives the raw bytes. Decoding into map[string]any first
+//     turns every JSON number into a float64, which CUE's `int` rejects.
+//   - A body that is not JSON fails at the conversion layer with E0C01, which is
+//     what separates a 400 from a 422.
+func ExampleValidator_ProcessValue_httpHandler() {
 	userSchema := schemix.MustNew(`{
 		username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
+		age:      int & >=13 & <=150
+		role:     "admin" | "user" | "guest"
+
 		email:    string @blob(this.email.is_email())
-		age:      int    @blob(this.age.between(min: 13, max: 150))
+		password: string @blob(this.password.str_len(min: 8, max: 64))
 	}`)
 
-	handler := func(body map[string]any) (int, string) {
-		r := userSchema.ProcessWithMode(body, schemix.FailAll)
-		if !r.Valid {
-			if r.HasCode(schemix.CodeRequiredMissing) {
-				return http.StatusUnprocessableEntity, "missing required fields"
-			}
-			return http.StatusBadRequest, "validation_failed"
-		}
-		return http.StatusOK, "ok"
+	respond := func(w http.ResponseWriter, status int, body any) {
+		// Before WriteHeader — afterwards the header is silently discarded.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
 	}
 
-	var good map[string]any
-	_ = json.Unmarshal([]byte(`{"username":"alice_dev","email":"a@example.com","age":28}`), &good)
-	// json.Unmarshal yields float64 for numbers; ProcessValue would convert for
-	// us, but here the map form is used directly so age is normalised by hand.
-	good["age"] = int64(28)
+	handler := func(w http.ResponseWriter, req *http.Request) {
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			respond(w, http.StatusBadRequest, map[string]any{"error": "unreadable_body"})
+			return
+		}
 
-	fmt.Println(handler(good))
-	fmt.Println(handler(map[string]any{"username": "alice_dev", "email": "nope", "age": int64(28)}))
-	// username is a plain CUE constraint, so its absence is a required-field
-	// error. Fields carrying @blob do not report E1M01 — their rule simply
-	// fails to evaluate, which is why username is the one omitted here.
-	fmt.Println(handler(map[string]any{"email": "a@example.com", "age": int64(28)}))
+		r := userSchema.ProcessValue(raw)
+		if !r.Valid {
+			if r.HasCode(schemix.CodeConfigError) {
+				respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
+				return
+			}
+			details := make([]map[string]string, len(r.Errors))
+			for i, e := range r.Errors {
+				details[i] = map[string]string{
+					"field":   e.Path,
+					"code":    string(e.Code),
+					"message": e.FriendlyMessage(),
+				}
+			}
+			respond(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":   "validation_failed",
+				"details": details,
+			})
+			return
+		}
+		respond(w, http.StatusCreated, map[string]any{"username": r.Output["username"]})
+	}
+
+	post := func(label, payload string) {
+		rec := httptest.NewRecorder()
+		handler(rec, httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(payload)))
+		fmt.Printf("%-11s %d %s | %s", label,
+			rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+
+	post("valid:", `{"username":"alice_dev","age":28,"role":"user",
+		"email":"alice@example.com","password":"correct-horse"}`)
+	post("age:", `{"username":"alice_dev","age":200,"role":"user",
+		"email":"alice@example.com","password":"correct-horse"}`)
+	post("not json:", `<html>`)
+
 	// Output:
-	// 200 ok
-	// 400 validation_failed
-	// 422 missing required fields
+	// valid:      201 application/json | {"username":"alice_dev"}
+	// age:        422 application/json | {"details":[{"code":"E1R01","field":"age","message":"age must be \u003c=150"}],"error":"validation_failed"}
+	// not json:   400 application/json | {"error":"malformed_json"}
+}
+
+// Counting bytes where runes were meant is the kind of mistake a validator
+// should not make quietly: three CJK characters occupy nine bytes, so a
+// byte-based minimum of eight lets them through.
+func ExampleValidator_Process_runeLength() {
+	byteLen := schemix.MustNew(`{ password: string @blob(this.password.len_between(min: 8, max: 64)) }`)
+	runeLen := schemix.MustNew(`{ password: string @blob(this.password.str_len(min: 8, max: 64)) }`)
+
+	short := map[string]any{"password": "密码密"} // 3 runes, 9 bytes
+
+	fmt.Println("len_between:", byteLen.Process(short).Valid)
+	fmt.Println("str_len:    ", runeLen.Process(short).Valid)
+	// Output:
+	// len_between: true
+	// str_len:     false
 }

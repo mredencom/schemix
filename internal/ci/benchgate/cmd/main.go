@@ -32,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	regressions, err := benchgate.ParseAndCheck(*csvPath, *threshold)
+	result, err := benchgate.ParseAndCheck(*csvPath, *threshold)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "ERROR: cannot parse benchstat CSV: %v\n", err)
 		_, _ = fmt.Fprintln(stderr, "Failing closed. Raw benchstat output:")
@@ -46,9 +46,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	if len(regressions) != 0 {
-		_, _ = fmt.Fprintf(stderr, "FAIL: %d benchmark metric(s) regressed >%.2f%%:\n", len(regressions), *threshold)
-		for _, regression := range regressions {
+
+	// Present in only one of the two runs, so outside the gate's reach. Printed
+	// because a benchmark this change adds is not yet guarded, and one that
+	// vanished may not have been meant to.
+	if len(result.Incomparable) != 0 {
+		_, _ = fmt.Fprintf(stdout, "NOTE: %d benchmark metric(s) exist in only one run and were not compared:\n",
+			len(result.Incomparable))
+		for _, name := range result.Incomparable {
+			_, _ = fmt.Fprintf(stdout, "  %s\n", name)
+		}
+	}
+
+	if len(result.Regressions) != 0 {
+		_, _ = fmt.Fprintf(stderr, "FAIL: %d benchmark metric(s) regressed >%.2f%%:\n", len(result.Regressions), *threshold)
+		for _, regression := range result.Regressions {
 			_, _ = fmt.Fprintf(stderr, "  %s %s: %+.2f%% (p=%.3f)\n",
 				regression.Name,
 				regression.Metric,

@@ -423,6 +423,46 @@ func TestLazyCUEEncode_SkippedWhenAllFieldsFastPathed(t *testing.T) {
 	}
 }
 
+// TestCUEFieldPath_PrecomputedNotParsedPerCall asserts that navigating to a
+// field does not re-parse its path on every call.
+//
+// cue.ParsePath runs the CUE expression parser: 36 allocations per call, for a
+// field name already known at compile time. A schema whose fields all need CUE
+// navigation would pay that per field per validation, so the budget below is
+// set well under one ParsePath's worth of allocations per navigated field.
+func TestCUEFieldPath_PrecomputedNotParsedPerCall(t *testing.T) {
+	// Every field here needs CUE navigation: two structs, and leaves carrying a
+	// != conjunct the fast descriptor deliberately refuses to hold.
+	v := MustNew(`{
+		order: {
+			id:   string & !=""
+			memo: string & !="secret"
+		}
+		note: string & !=""
+	}`)
+	data := map[string]any{
+		"order": map[string]any{"id": "A-1", "memo": "hello"},
+		"note":  "n",
+	}
+
+	if ok, errs := v.Validate(data); !ok {
+		t.Fatalf("precondition failed, schema should accept data: %v", errs)
+	}
+
+	// 5 navigated fields (order, order.id, order.memo, note, plus the nested
+	// re-navigation) at 36 allocations per ParsePath would alone exceed 180.
+	const budget = 200
+	got := testing.AllocsPerRun(200, func() {
+		v.Validate(data)
+	})
+
+	if got > budget {
+		t.Errorf("Validate allocated %.0f objects, want <= %d — field paths appear "+
+			"to be re-parsed by cue.ParsePath on every call instead of being "+
+			"precomputed at schema compile time", got, budget)
+	}
+}
+
 // TestLazyCUEEncode_StillCorrectWhenEncodeNeeded covers the paths that DO need a
 // cue.Value: unsigned integers make the fast path return Handled=false, and
 // struct/list/@blob fields have no fast descriptor at all. Each case is compared

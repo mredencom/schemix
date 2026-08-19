@@ -24,14 +24,14 @@ CUE 约束 + Bloblang 动态表达式，统一。
 graph TD
     SRC["<b>CUE schema 文本</b><br/>约束 · @blob · @meta<br/>由 New() 编译一次"]:::schema
 
-    SRC --> FAST["<b>fastConstraint</b><br/>仅标量"]:::fast
-    SRC --> CV["<b>CUE schema 值</b><br/>结构体 · 数组"]:::slow
+    SRC --> FAST["<b>fastConstraint</b><br/>标量 · 标量列表"]:::fast
+    SRC --> CV["<b>CUE schema 值</b><br/>结构体 · 结构体列表"]:::slow
 
     FAST --> L1["<b>第 1 层</b> · 约束校验"]:::layer
     CV --> L1
 
-    L1 -->|全部字段皆标量| Z["<b>Go 快速路径</b><br/>无 cue.Value · 零分配"]:::fast
-    L1 -->|结构体 · 数组 · blob| E["<b>惰性 Encode</b><br/>LookupPath · Unify"]:::slow
+    L1 -->|每个字段都有描述符| Z["<b>Go 快速路径</b><br/>无 cue.Value · 零分配"]:::fast
+    L1 -->|结构体 · 结构体列表 · blob| E["<b>惰性 Encode</b><br/>LookupPath · Unify"]:::slow
 
     Z --> L2["<b>第 2 层</b> · @blob + @meta<br/>在原始 Go map 上求值"]:::layer
     E --> L2
@@ -195,11 +195,15 @@ r.Output["fee"]        // 150
 
 | 方法 | 用法 | 说明 |
 |------|------|------|
-| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | 字符串/数组/Map 长度 |
-| `min_len(n)` | `this.s.min_len(n: 3)` | 最小长度 |
-| `max_len(n)` | `this.s.max_len(n: 100)` | 最大长度 |
+| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | 字符串的**字节**长度；数组/Map 的元素个数 |
+| `min_len(n)` | `this.s.min_len(n: 3)` | 最小值，单位同 `len_between` |
+| `max_len(n)` | `this.s.max_len(n: 100)` | 最大值，单位同 `len_between` |
 | `str_len(min,max)` | `this.s.str_len(min:2, max:10)` | 字符数（rune）范围 |
 | `between(min,max)` | `this.age.between(min:0, max:150)` | 数值范围（闭区间） |
+
+> **面向用户的长度限制请用 `str_len`。** 三个 `*_len` 方法对字符串数的是字节，
+> 所以 `password.len_between(min: 8, max: 64)` 会放过三个汉字 —— 九个字节。
+> `str_len` 数的是 rune。
 
 ### 金融
 
@@ -227,33 +231,80 @@ r.Output["fee"]        // 150
 
 ```go
 var userSchema = schemix.MustNew(`{
+    // CUE 能表达的就交给 CUE：这些字段留在 Go 原生快速路径上，
+    // 违反时能给出精确的错误码和被突破的边界。
     username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
-    email:    string @blob(this.email.is_email())
-    password: string @blob(this.password.len_between(min: 8, max: 64))
-    age:      int    @blob(this.age.between(min: 13, max: 150))
+    age:      int & >=13 & <=150
     role:     "admin" | "user" | "guest"
-}`, schemix.WithErrorFormatter(apiFormatter))
+
+    // 规则只用于 CUE 表达不了的部分。str_len 按 rune 计数；
+    // len_between 按字节计数，会让三个汉字冒充八位长度通过。
+    email:    string @blob(this.email.is_email())
+    password: string @blob(this.password.str_len(min: 8, max: 64))
+}`)
 
 func CreateUser(w http.ResponseWriter, req *http.Request) {
-    var body map[string]any
-    json.NewDecoder(req.Body).Decode(&body)
+    raw, err := io.ReadAll(req.Body)
+    if err != nil {
+        respond(w, http.StatusBadRequest, map[string]any{"error": "unreadable_body"})
+        return
+    }
 
-    r := userSchema.ProcessWithMode(body, schemix.FailAll)
+    // 把原始字节交给 ProcessValue，JSON 数字才能作为整数抵达 `int` 字段。
+    // 先 decode 成 map[string]any 会让所有数字变成 float64，而 CUE 的 `int`
+    // 不接受 float —— 见下方说明。
+    r := userSchema.ProcessValue(raw) // FailAll：收集全部错误
     if !r.Valid {
-        status := http.StatusBadRequest
-        if r.HasCode(schemix.CodeRequiredMissing) {
-            status = http.StatusUnprocessableEntity
+        // 完全不是 JSON 的请求体在转换层就失败了。这与「某个字段违反规则」
+        // 是两类不同的问题，应该给 400。
+        if r.HasCode(schemix.CodeConfigError) {
+            respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
+            return
         }
-        w.WriteHeader(status)
-        json.NewEncoder(w).Encode(map[string]any{
+
+        details := make([]map[string]string, len(r.Errors))
+        for i, e := range r.Errors {
+            details[i] = map[string]string{
+                "field": e.Path,
+                "code":  string(e.Code),
+                // FriendlyMessage() 是面向用户的措辞；e.Message 是 CUE/Bloblang
+                // 的原始诊断 —— 写进日志，不要返回给调用方。
+                "message": e.FriendlyMessage(),
+            }
+        }
+        respond(w, http.StatusUnprocessableEntity, map[string]any{
             "error":   "validation_failed",
-            "details": r.Errors,
+            "details": details,
         })
         return
     }
-    // 使用 r.Output ...
+
+    respond(w, http.StatusCreated, saveUser(r.Output)) // 计算字段已包含在内
+}
+
+// respond 输出 JSON。Content-Type 必须在 WriteHeader **之前**设置，
+// 之后设置的 header 会被静默丢弃。
+func respond(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
 }
 ```
+
+无法解析的请求体是 `400`；格式正确但内容不符合 schema 是 `422`。
+`HasCode` 用来区分这两者。
+
+> **传给 `ProcessValue` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
+> 会把所有 JSON 数字变成 `float64`，而 CUE 中 `int` 与 `float` 是平行类型，
+> 所以 `age: int & >=13 & <=150` 会以 `E1T01` 拒绝 decode 出来的 `28`。
+> `ProcessValue` 会在数值允许的前提下把 JSON 数字转成整数。
+> （`json.Decoder.UseNumber()` 也没用 —— `json.Number` 本质是字符串。）
+
+> **CUE 能表达的约束不要写成 `@blob`。** `age: int & >=13 & <=150` 失败时给出
+> `E1R01` 和 `age must be <=150`；同样的边界写成
+> `@blob(this.age.between(min: 13, max: 150))` 失败时给出 `E2B01` 和
+> `age does not satisfy a validation rule` —— 调用方完全不知道该怎么改，
+> 而且该字段还丢掉了快速路径描述符。
 
 ## Schema 语法
 
@@ -365,6 +416,13 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
 > **元素 schema 内部的 attribute 会被拒绝。** `items: [...{qty: int @blob(…)}]`
 > 会让 `New()` 返回错误 —— 规则是按字段路径编译的，而元素下标在运行时才确定，
 > 该 attribute 会被静默丢弃并放过非法数据。错误信息会指出出错路径和正确写法。
+
+> **元素为标量的列表远比元素为结构体的列表便宜。** `[...string]`、`[...int & >0]`、
+> `[..."A" | "B"]` 由纯 Go 逐元素检查、零分配 —— 因为一个标量描述符就能判定所有元素。
+> 元素为结构体的列表没有这样的描述符，整个 list 交给 `cue.Value.Unify`，
+> 约每元素 6.5 µs。两者的错误路径完全一致 —— `tags[1]`，每个违规元素一条错误。
+> 一旦加上 list 级约束（`list.MinItems`）、固定长度（`[string, string]`）
+> 或列表类型的 disjunction，字段就会退回 CUE —— 这些都无法归约为逐元素检查。
 
 ## 自定义函数与方法
 
@@ -784,22 +842,28 @@ Apple M4, Go 1.25.11 — 6 字段（3 CUE + 3 @blob）：
 
 | 操作 | 耗时 | 内存 | 分配次数 |
 |------|------|------|----------|
-| `New`（编译） | 430 µs | 796 KiB | 22366 |
+| `New`（编译） | 431 µs | 796 KiB | 22380 |
 | `Process`（合法） | **4.67 µs** | 11.90 KiB | 86 |
 | `Process`（非法） | 5.59 µs | 13.14 KiB | 102 |
-| `Process`（嵌套） | 37.35 µs | 45.86 KiB | 492 |
+| `Process`（嵌套） | 26.51 µs | 42.07 KiB | 420 |
 | `Validate`（无输出） | **4.82 µs** | 11.54 KiB | 82 |
 | `Process`（并行，10 核） | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields`（快速路径） | 146.5 ns | 0 B | 0 |
+| `ValidateFields`（快速路径） | 149.0 ns | 0 B | 0 |
+| `Validate`（3 个标量列表，各 1 元素） | **72.9 ns** | 0 B | 0 |
+| `Validate`（3 个标量列表，各 10 元素） | **338 ns** | 0 B | 0 |
 | `Registry.Get` | 6.25 ns | 0 B | 0 |
 
 > 简单标量字段使用 Go 原生快速路径，完全绕过 CUE，
-> 相比 CUE 旧路径实现约 **175 倍加速**（146.5ns vs 25.62µs）。
+> 相比 CUE 旧路径实现约 **172 倍加速**（149.0ns vs 25.62µs）。
 >
 > `cue.Context.Encode` 现在是**惰性**的：如果 schema 的所有字段都由快速路径处理，
 > 输入数据根本不会被转换成 `cue.Value`。上表每一行相比早期版本少掉的正好是那 39 次分配
-> （`Process` 125 → 86，`Validate` 121 → 82）。嵌套与数组 schema 仍然需要该转换，
-> 所以 `Process`（嵌套）的 492 次分配没有变化。
+> （`Process` 125 → 86，`Validate` 121 → 82）。含结构体的 schema 仍然需要该转换，
+> 这正是 `Process`（嵌套）测量的内容 —— 由于字段查找路径改为编译期构建而非每次调用
+> 重新解析，分配次数从 492 降到 420。
+>
+> 元素为**标量**的列表同样由快速路径处理，零分配；元素为**结构体**的列表不是，
+> 详见[数组拆解](benchmarks/comparison/README.md#arrays-it-depends-on-the-element)。
 >
 > Pull Request 会在同一 CI runner 上分别运行 base 与 head benchmark；
 > 统计显著且超过 5% 的性能退化会使 benchmark gate 失败。
@@ -819,9 +883,9 @@ Apple M4、Go 1.25.11，`benchstat` 中位数。每次操作的耗时 / 分配�
 | 标量，非法 | **1.06 µs · 15** | 733 ns · 25 | 2.05 µs · 49 | 2.13 µs · 81 | 16.30 µs · 301 |
 | 并行，10 核 | **~100 ns · 0** | 247 ns · 6 | — | 785 ns · 56 | — |
 | JSON 字节，端到端 | 1.69 µs · 31 | 1.50 µs · 14 | 2.52 µs · 45 | 2.82 µs · 80 | — |
-| 嵌套 + 3 元素数组 | 27.35 µs · 432 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
-| 含一条 `@blob()` | 6.44 µs · 127 | 不支持 | 不支持 | 不支持 | — |
-| 编译（启动时一次） | 43.97 µs | 10.11 µs | — | 65.97 µs | — |
+| 嵌套 + 3 元素数组 | 23.77 µs · 360 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
+| 含一条 `@blob()` | 4.82 µs · 91 | 不支持 | 不支持 | 不支持 | — |
+| 编译（启动时一次） | 56.59 µs | 10.11 µs | — | 65.97 µs | — |
 
 能力差异是结构性的，不是纳秒级的：
 
@@ -841,11 +905,13 @@ Apple M4、Go 1.25.11，`benchstat` 中位数。每次操作的耗时 / 分配�
 
 这个头条数字有两条必须说清的边界：
 
-- 只要加入**一条 `@blob()`、一个嵌套结构体或一个数组**，输入就必须被编码成
+- 只要加入**一条 `@blob()` 或一个嵌套结构体**，输入就必须被编码成
   `cue.Value`，成本上升一个数量级。
-- **数组是短板**：快速路径没有 list 描述符，整个 list 交给 `cue.Value.Unify`，
-  约每元素 6.3 µs。对大集合改用「按元素校验」——
-  [实测快 62-82 倍](benchmarks/comparison/README.md#mitigation)。
+- **数组取决于元素是什么。** 元素为标量的列表 —— `[...string]`、
+  `[...int & >0]`、`[..."A" | "B"]` —— 完全由快速路径处理，零分配。
+  元素为**结构体**的列表（`[...{…}]`）没有对应的描述符，整个 list 交给
+  `cue.Value.Unify`，约每元素 6.5 µs；这类集合改用「按元素校验」——
+  [实测快 55-76 倍](benchmarks/comparison/README.md#mitigation)。
 
 schemix 提供的、纯吞吐指标覆盖不到的能力：schema 是可热加载的文本而非编译进
 二进制的 Go 代码，外加计算字段（`@blob()`）、动态表达式、结构化错误码、
