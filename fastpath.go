@@ -516,16 +516,16 @@ type fastResult struct {
 	// Suggestion carries the closest valid value for enum violations. Empty for
 	// every other constraint kind — see ValidationError.Suggestion.
 	Suggestion string
-
-	// ElemFailures is set only by constraintList, one entry per rejected element.
-	// CUE reports every offending element rather than stopping at the first, so
-	// the fast path must too. Nil for every other constraint kind, which keeps
-	// the scalar path allocation-free.
-	ElemFailures []fastElemFailure
 }
 
 // fastElemFailure describes one rejected element of a list, carrying the index
 // the error path needs.
+//
+// List failures are returned separately by validateFastElements rather than as a
+// field on fastResult: a slice header there grew the struct from 56 to 80 bytes,
+// and since fastResult is returned by value for every scalar field of every
+// validation, that cost 6% on the scalar fast path — measurable, and paid by
+// schemas containing no list at all.
 type fastElemFailure struct {
 	Index      int
 	Code       ErrorCode
@@ -574,34 +574,42 @@ func validateFast(fc *fastConstraint, val any) fastResult {
 	case constraintEnum:
 		return validateFastEnum(fc, val)
 	case constraintList:
-		return validateFastList(fc, val)
+		// A list can reject several elements at once, which a single fastResult
+		// cannot express; validateFastElements is the entry point for it. Handing
+		// the value back to CUE is the safe answer if anything reaches here.
+		return fallbackToCUE()
 	default:
 		return pass() // should not reach here
 	}
 }
 
-// validateFastList checks every element of a list against fc.elem.
+// validateFastElements checks every element of a list against fc.elem and
+// returns one failure per rejected element, in index order. CUE reports every
+// offending element rather than stopping at the first, so this does too.
+//
+// handled=false means the caller must fall through to CUE Unify, exactly as
+// fastResult.Handled=false does for a scalar. failures is nil when the list is
+// valid, which is the common case and stays allocation-free.
 //
 // Only []any is served. A concretely typed slice such as []string would need a
 // reflect-based walk, and CUE already handles it correctly, so it falls back
 // rather than grow a second code path.
 //
 // If any single element cannot be decided — an unsigned integer, say — the whole
-// list falls back to CUE. Accepting the elements the descriptor happens to
-// understand while ignoring one it does not would be the same fail-open bug the
-// scalar descriptors were fixed for.
-func validateFastList(fc *fastConstraint, val any) fastResult {
+// list falls back. Accepting the elements the descriptor happens to understand
+// while ignoring one it does not would be the same fail-open bug the scalar
+// descriptors were fixed for.
+func validateFastElements(fc *fastConstraint, val any) (failures []fastElemFailure, handled bool) {
 	items, ok := val.([]any)
 	if !ok {
 		// Not a list at all, or a typed slice. CUE decides.
-		return fallbackToCUE()
+		return nil, false
 	}
 
-	var failures []fastElemFailure
 	for i, item := range items {
 		er := validateFast(fc.elem, item)
 		if !er.Handled {
-			return fallbackToCUE()
+			return nil, false
 		}
 		if er.Valid {
 			continue
@@ -617,11 +625,7 @@ func validateFastList(fc *fastConstraint, val any) fastResult {
 			Suggestion: er.Suggestion,
 		})
 	}
-
-	if failures == nil {
-		return pass()
-	}
-	return fastResult{Handled: true, Valid: false, ElemFailures: failures}
+	return failures, true
 }
 
 func validateFastType(fc *fastConstraint, val any) fastResult {

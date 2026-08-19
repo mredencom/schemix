@@ -92,41 +92,10 @@ func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, raw
 
 		// Optimization #4: Go-native fast path — skip CUE Encode+Unify for simple constraints
 		if f.fast != nil {
-			fr := validateFast(f.fast, goVal)
-			if v.metrics != nil {
-				v.metrics.ObserveFastpathDecision(f.path, fr.Handled)
-			}
-			if fr.Handled {
-				if !fr.Valid {
-					result.Valid = false
-					if len(fr.ElemFailures) > 0 {
-						// A list reports one error per offending element, indexed
-						// the same way CUE does: items[1], not items.
-						for _, ef := range fr.ElemFailures {
-							ePath := indexedPath(f.path, ef.Index)
-							result.Errors = append(result.Errors, ValidationError{
-								Code:       ef.Code,
-								Path:       ePath,
-								Type:       TypeCUE,
-								Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
-								FieldType:  f.fieldType,
-								Suggestion: ef.Suggestion,
-							})
-						}
-					} else {
-						result.Errors = append(result.Errors, ValidationError{
-							Code:       fr.Code,
-							Path:       f.path,
-							Type:       TypeCUE,
-							Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
-							FieldType:  f.fieldType,
-							Suggestion: fr.Suggestion,
-						})
-					}
-				}
+			if v.checkFast(f, goVal, result) {
 				continue
 			}
-			// fr.Handled=false: fall through to CUE Unify
+			// Not handled: fall through to CUE Unify
 		}
 
 		// Only now do we touch CUE for actual constraint validation, which is
@@ -224,6 +193,65 @@ func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, raw
 			}
 		}
 	}
+}
+
+// checkFast runs the Go-native descriptor for one field and records any
+// violation. It reports whether the descriptor decided the field; false means the
+// caller must fall through to CUE Unify.
+//
+// Lists take a separate route because they can reject several elements at once,
+// which one fastResult cannot carry.
+func (v *Validator) checkFast(f *cueField, goVal any, result *Result) bool {
+	if f.fast.kind == constraintList {
+		return v.checkFastList(f, goVal, result)
+	}
+
+	fr := validateFast(f.fast, goVal)
+	if v.metrics != nil {
+		v.metrics.ObserveFastpathDecision(f.path, fr.Handled)
+	}
+	if !fr.Handled {
+		return false
+	}
+	if !fr.Valid {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Code:       fr.Code,
+			Path:       f.path,
+			Type:       TypeCUE,
+			Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
+			FieldType:  f.fieldType,
+			Suggestion: fr.Suggestion,
+		})
+	}
+	return true
+}
+
+// checkFastList records one error per rejected element, indexed the way CUE does
+// it: items[1], not items.
+func (v *Validator) checkFastList(f *cueField, goVal any, result *Result) bool {
+	failures, handled := validateFastElements(f.fast, goVal)
+	if v.metrics != nil {
+		v.metrics.ObserveFastpathDecision(f.path, handled)
+	}
+	if !handled {
+		return false
+	}
+	if len(failures) > 0 {
+		result.Valid = false
+		for _, ef := range failures {
+			ePath := indexedPath(f.path, ef.Index)
+			result.Errors = append(result.Errors, ValidationError{
+				Code:       ef.Code,
+				Path:       ePath,
+				Type:       TypeCUE,
+				Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
+				FieldType:  f.fieldType,
+				Suggestion: ef.Suggestion,
+			})
+		}
+	}
+	return true
 }
 
 // validateCUERecursive is the legacy recursive validation method.
