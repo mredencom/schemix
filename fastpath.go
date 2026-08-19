@@ -47,14 +47,36 @@ type fastConstraint struct {
 	minExcl  bool    // true = > (exclusive), false = >= (inclusive)
 	maxExcl  bool    // true = < (exclusive), false = <= (inclusive)
 
-	// Enum constraint
+	// Enum constraint. The slices are the source of truth for the candidate
+	// listing in an error message, which must follow declaration order.
 	stringEnums []string
 	intEnums    []int64
 	floatEnums  []float64
 
+	// Membership sets, built only for enums large enough that a hash lookup beats
+	// a scan — see enumSetThreshold. Nil means scan the slice.
+	stringEnumSet map[string]struct{}
+	intEnumSet    map[int64]struct{}
+
 	// List constraint: the descriptor every element must satisfy (constraintList).
 	elem *fastConstraint
 }
+
+// enumSetThreshold is the candidate count at which a hash lookup starts beating
+// a linear scan. Measured with the value already boxed in an any, as it arrives
+// at runtime, and the hit at the average (middle) position:
+//
+//	n      linear      map
+//	3      3.1 ns     5.5 ns
+//	5      4.3 ns     5.5 ns
+//	8      7.4 ns     5.5 ns
+//	16    12.4 ns     4.8 ns
+//	50    39.2 ns     5.5 ns
+//	180  158.2 ns     5.6 ns
+//
+// Below it the scan wins, and most enums are small — currencies, statuses,
+// roles — so the set is built only where it pays for itself.
+const enumSetThreshold = 8
 
 // extractFastConstraint analyzes a CUE field schema at compile time and
 // attempts to extract a pure-Go constraint descriptor. Returns nil if
@@ -166,9 +188,10 @@ func extractStringConstraint(schema cue.Value) *fastConstraint {
 	// Check for enum (disjunction of string literals)
 	if enums := extractStringEnums(schema); enums != nil {
 		return &fastConstraint{
-			kind:         constraintEnum,
-			expectString: true,
-			stringEnums:  enums,
+			kind:          constraintEnum,
+			expectString:  true,
+			stringEnums:   enums,
+			stringEnumSet: newStringEnumSet(enums),
 		}
 	}
 
@@ -244,9 +267,10 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 	// Check for enum (disjunction of int literals)
 	if enums := extractIntEnums(schema); enums != nil {
 		return &fastConstraint{
-			kind:      constraintEnum,
-			expectInt: true,
-			intEnums:  enums,
+			kind:       constraintEnum,
+			expectInt:  true,
+			intEnums:   enums,
+			intEnumSet: newIntEnumSet(enums),
 		}
 	}
 
@@ -753,17 +777,54 @@ func validateFastInt64Range(fc *fastConstraint, n int64) fastResult {
 	return pass()
 }
 
+// newStringEnumSet returns a membership set, or nil when the candidate list is
+// short enough that scanning it is faster. See enumSetThreshold.
+func newStringEnumSet(enums []string) map[string]struct{} {
+	if len(enums) < enumSetThreshold {
+		return nil
+	}
+	set := make(map[string]struct{}, len(enums))
+	for _, e := range enums {
+		set[e] = struct{}{}
+	}
+	return set
+}
+
+// newIntEnumSet is newStringEnumSet for int candidates.
+//
+// There is no float counterpart: a float enum is rare enough that no measurement
+// justifies the extra state, and equality on float64 is delicate enough not to
+// touch without one.
+func newIntEnumSet(enums []int64) map[int64]struct{} {
+	if len(enums) < enumSetThreshold {
+		return nil
+	}
+	set := make(map[int64]struct{}, len(enums))
+	for _, e := range enums {
+		set[e] = struct{}{}
+	}
+	return set
+}
+
 func validateFastEnum(fc *fastConstraint, val any) fastResult {
 	if fc.stringEnums != nil {
 		s, ok := val.(string)
 		if !ok {
 			return fail(CodeTypeMismatch, fmt.Sprintf("expected string, got %T", val))
 		}
-		for _, e := range fc.stringEnums {
-			if s == e {
+		if fc.stringEnumSet != nil {
+			if _, hit := fc.stringEnumSet[s]; hit {
 				return pass()
 			}
+		} else {
+			for _, e := range fc.stringEnums {
+				if s == e {
+					return pass()
+				}
+			}
 		}
+		// The listing comes from the ordered slice, never from the set, so the
+		// message reads in the order the schema declared.
 		return failEnum(
 			stringEnumDetail(s, fc.stringEnums),
 			suggestClosest(s, fc.stringEnums),
@@ -782,9 +843,15 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 			return fallbackToCUE()
 		}
 		n, _ := toInt64(val)
-		for _, e := range fc.intEnums {
-			if n == e {
+		if fc.intEnumSet != nil {
+			if _, hit := fc.intEnumSet[n]; hit {
 				return pass()
+			}
+		} else {
+			for _, e := range fc.intEnums {
+				if n == e {
+					return pass()
+				}
 			}
 		}
 		return failEnum(int64EnumDetail(n, fc.intEnums), "")

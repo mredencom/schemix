@@ -1,8 +1,11 @@
 package schemix
 
 import (
+	"fmt"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -599,5 +602,125 @@ func TestListFastpath_FallsBackWhenAnElementIsUnrepresentable(t *testing.T) {
 	}
 	if !slices.Equal(gotPaths, wantPaths) {
 		t.Errorf("error paths = %v, want %v (CUE oracle)", gotPaths, wantPaths)
+	}
+}
+
+// ─── Enum lookup strategy ───────────────────────────────────────────────────
+
+// TestEnumLookup_LargeEnumsUseHashLookup asserts the lookup structure directly,
+// because that structure *is* the behaviour under test here and a wall-clock
+// assertion in a unit test would be flaky. The benchmark gate in CI covers the
+// timing side.
+//
+// Measured with the value already boxed in an any and the hit at the average
+// position, a scan costs 3.1 ns at n=3 but 158 ns at n=180, while a hash lookup
+// stays near 5 ns. Below the threshold the scan wins, so small enums — the
+// common case — must keep it.
+func TestEnumLookup_LargeEnumsUseHashLookup(t *testing.T) {
+	build := func(n int) string {
+		alts := make([]string, n)
+		for i := range alts {
+			alts[i] = fmt.Sprintf("%q", fmt.Sprintf("code_%03d", i))
+		}
+		return "{ c: " + strings.Join(alts, " | ") + " }"
+	}
+
+	t.Run("small enum keeps the scan", func(t *testing.T) {
+		v := MustNew(build(enumSetThreshold - 1))
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.stringEnumSet != nil {
+			t.Errorf("built a hash set for %d candidates; a scan is faster below %d",
+				enumSetThreshold-1, enumSetThreshold)
+		}
+	})
+
+	t.Run("large enum uses a set", func(t *testing.T) {
+		const n = 60
+		v := MustNew(build(n))
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.stringEnumSet == nil {
+			t.Fatalf("still scanning %d candidates linearly", n)
+		}
+		if len(fc.stringEnumSet) != n {
+			t.Errorf("set holds %d candidates, want %d", len(fc.stringEnumSet), n)
+		}
+	})
+
+	t.Run("large int enum uses a set", func(t *testing.T) {
+		const n = 60
+		alts := make([]string, n)
+		for i := range alts {
+			alts[i] = strconv.Itoa(i)
+		}
+		v := MustNew("{ n: " + strings.Join(alts, " | ") + " }")
+		fc := v.cueFields[0].fast
+		if fc == nil || fc.kind != constraintEnum {
+			t.Fatalf("expected an enum descriptor, got %+v", fc)
+		}
+		if fc.intEnumSet == nil {
+			t.Fatalf("still scanning %d int candidates linearly", n)
+		}
+	})
+}
+
+// TestEnumLookup_StrategyDoesNotChangeBehaviour pins what must hold whichever
+// lookup a schema ends up with. The listing order matters most: a map has none,
+// so the candidate list in the message must keep coming from the ordered slice.
+func TestEnumLookup_StrategyDoesNotChangeBehaviour(t *testing.T) {
+	// Straddle the threshold so one schema scans and the other hashes.
+	for _, n := range []int{3, 60} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			alts := make([]string, n)
+			want := make([]string, n)
+			for i := range alts {
+				want[i] = fmt.Sprintf("code_%03d", i)
+				alts[i] = fmt.Sprintf("%q", want[i])
+			}
+			schema := "{ c: " + strings.Join(alts, " | ") + " }"
+			v := MustNew(schema)
+
+			// Every candidate is accepted, wherever it sits in the list.
+			for _, candidate := range want {
+				if ok, errs := v.Validate(map[string]any{"c": candidate}); !ok {
+					t.Fatalf("candidate %q rejected: %v", candidate, errs)
+				}
+			}
+
+			// A non-candidate is rejected, and the message lists every candidate
+			// in declaration order.
+			r := v.Process(map[string]any{"c": "code_999"})
+			if r.Valid {
+				t.Fatal("expected a non-candidate to be rejected")
+			}
+			if len(r.Errors) != 1 {
+				t.Fatalf("want exactly 1 error, got %d: %v", len(r.Errors), r.Errors)
+			}
+			e := r.Errors[0]
+			if e.Code != CodeEnumInvalid {
+				t.Errorf("code = %s, want %s", e.Code, CodeEnumInvalid)
+			}
+			if got := stringEnumDetail("code_999", want); e.Message != got {
+				t.Errorf("message = %q, want %q — the candidate list must come from "+
+					"the ordered slice, not from map iteration", e.Message, got)
+			}
+
+			// Suggestion still finds the closest candidate.
+			r2 := v.Process(map[string]any{"c": "code_00"})
+			if len(r2.Errors) != 1 || r2.Errors[0].Suggestion == "" {
+				t.Errorf("expected a suggestion for a near-miss, got %v", r2.Errors)
+			}
+
+			// A wrong type is still a type error, not an enum error.
+			r3 := v.Process(map[string]any{"c": int64(1)})
+			if len(r3.Errors) != 1 || r3.Errors[0].Code != CodeTypeMismatch {
+				t.Errorf("want a single %s, got %v", CodeTypeMismatch, r3.Errors)
+			}
+		})
 	}
 }
