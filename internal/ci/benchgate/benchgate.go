@@ -21,21 +21,38 @@ type Regression struct {
 	PValue        float64
 }
 
+// Result is the outcome of one gate run over a benchstat comparison.
+type Result struct {
+	// Regressions are the metrics that both exceeded the threshold and reached
+	// statistical significance.
+	Regressions []Regression
+
+	// Incomparable names benchmarks benchstat found in only one of its two
+	// inputs, one entry per metric section, formatted as "Name metric".
+	//
+	// A benchmark added by the change under review lands here, and so does one
+	// that was removed. Neither has a comparison to judge, but both are worth
+	// surfacing: a newly added benchmark is not yet guarded by this gate, and one
+	// that disappeared may not have been meant to.
+	Incomparable []string
+}
+
 // ParseAndCheck reads benchstat -format=csv output and reports regressions
 // whose positive change is both statistically significant and above threshold.
-func ParseAndCheck(path string, threshold float64) ([]Regression, error) {
+func ParseAndCheck(path string, threshold float64) (Result, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open benchstat CSV: %w", err)
+		return Result{}, fmt.Errorf("open benchstat CSV: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	return parseAndCheck(f, threshold)
 }
 
-func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
+func parseAndCheck(input io.Reader, threshold float64) (Result, error) {
+	var result Result
 	if math.IsNaN(threshold) || math.IsInf(threshold, 0) || threshold < 0 {
-		return nil, fmt.Errorf("invalid threshold %v", threshold)
+		return Result{}, fmt.Errorf("invalid threshold %v", threshold)
 	}
 
 	reader := csv.NewReader(input)
@@ -46,7 +63,6 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 	metric := ""
 	sawHeader := false
 	comparableRows := 0
-	var regressions []Regression
 
 	for recordNumber := 1; ; recordNumber++ {
 		record, err := reader.Read()
@@ -54,7 +70,7 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("parse CSV record %d: %w", recordNumber, err)
+			return Result{}, fmt.Errorf("parse CSV record %d: %w", recordNumber, err)
 		}
 		if isBlankRecord(record) {
 			continue
@@ -63,12 +79,12 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 		if idx := findColumn(record, "vs base"); idx >= 0 {
 			pColumn := findColumn(record, "p")
 			if pColumn < 0 {
-				return nil, fmt.Errorf("record %d: comparison header has no P column: %v", recordNumber, record)
+				return Result{}, fmt.Errorf("record %d: comparison header has no P column: %v", recordNumber, record)
 			}
 			changeIdx, pIdx = idx, pColumn
 			metric = metricName(record, idx)
 			if metric == "" {
-				return nil, fmt.Errorf("record %d: comparison header has no metric: %v", recordNumber, record)
+				return Result{}, fmt.Errorf("record %d: comparison header has no metric: %v", recordNumber, record)
 			}
 			sawHeader = true
 			continue
@@ -83,27 +99,35 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 			continue // The intentionally short file-label header.
 		}
 		if changeIdx < 0 {
-			return nil, fmt.Errorf("record %d: data row before comparison header: %v", recordNumber, record)
+			return Result{}, fmt.Errorf("record %d: data row before comparison header: %v", recordNumber, record)
 		}
 		if strings.EqualFold(first, "geomean") {
 			continue
 		}
 		if changeIdx >= len(record) || pIdx >= len(record) {
-			return nil, fmt.Errorf("record %d: short benchmark row: %v", recordNumber, record)
+			// For a benchmark present in only one input, benchstat omits the
+			// comparison columns rather than leaving them empty: three fields
+			// when only base has it, five when only head does. Any change that
+			// adds or removes a benchmark produces these, and there is no
+			// comparison to judge, so record and move on rather than failing.
+			result.Incomparable = append(result.Incomparable, first+" "+metric)
+			continue
 		}
 
 		changeRaw := strings.TrimSpace(record[changeIdx])
 		pRaw := strings.TrimSpace(record[pIdx])
 		if changeRaw == "" && pRaw == "" {
-			continue // Benchmark exists in only one input and cannot be compared.
+			// Same situation, padded out to full width.
+			result.Incomparable = append(result.Incomparable, first+" "+metric)
+			continue
 		}
 		if changeRaw == "" || pRaw == "" {
-			return nil, fmt.Errorf("record %d: incomplete comparison for %q", recordNumber, first)
+			return Result{}, fmt.Errorf("record %d: incomplete comparison for %q", recordNumber, first)
 		}
 
 		pValue, err := parsePValue(pRaw)
 		if err != nil {
-			return nil, fmt.Errorf("record %d benchmark %q: %w", recordNumber, first, err)
+			return Result{}, fmt.Errorf("record %d benchmark %q: %w", recordNumber, first, err)
 		}
 		comparableRows++
 		if changeRaw == "~" {
@@ -112,10 +136,10 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 
 		change, err := parsePercent(changeRaw)
 		if err != nil {
-			return nil, fmt.Errorf("record %d benchmark %q: %w", recordNumber, first, err)
+			return Result{}, fmt.Errorf("record %d benchmark %q: %w", recordNumber, first, err)
 		}
 		if change > threshold && pValue < significanceLevel {
-			regressions = append(regressions, Regression{
+			result.Regressions = append(result.Regressions, Regression{
 				Name:          first,
 				Metric:        metric,
 				ChangePercent: change,
@@ -125,12 +149,14 @@ func parseAndCheck(input io.Reader, threshold float64) ([]Regression, error) {
 	}
 
 	if !sawHeader {
-		return nil, fmt.Errorf("benchstat CSV has no comparison header")
+		return Result{}, fmt.Errorf("benchstat CSV has no comparison header")
 	}
 	if comparableRows == 0 {
-		return nil, fmt.Errorf("benchstat CSV has no comparable benchmark rows")
+		// Every row was one-sided, so the two runs share no benchmark and the
+		// gate has judged nothing. That is a broken comparison, not a pass.
+		return Result{}, fmt.Errorf("benchstat CSV has no comparable benchmark rows")
 	}
-	return regressions, nil
+	return result, nil
 }
 
 func isBlankRecord(record []string) bool {
