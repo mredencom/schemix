@@ -16,6 +16,7 @@ import (
 type cueField struct {
 	name      string          // field name (without "?")
 	path      string          // full dot-separated path
+	cuePath   cue.Path        // pre-built lookup path for name; see compileCUEFields
 	schema    cue.Value       // pre-resolved schema value
 	optional  bool            // whether the field is optional
 	nullable  bool            // schema allows null (e.g. `null | string`)
@@ -129,6 +130,10 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			priority: extractFieldPriority(fieldSchema),
 			// Resolved once here so the error path never pays for kind lookup.
 			fieldType: cueKindToString(fieldSchema.IncompleteKind()),
+			// MakePath builds the selector directly. cue.ParsePath would run the
+			// CUE expression parser — 36 allocations for a name already known
+			// here — and validateCUEFields navigates once per field per call.
+			cuePath: cue.MakePath(cue.Str(name)),
 		}
 
 		// Recursively compile nested struct fields

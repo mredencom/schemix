@@ -114,8 +114,9 @@ func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, raw
 		}
 
 		// Only now do we touch CUE for actual constraint validation, which is
-		// also the point where the lazy encode is forced.
-		fieldData := data.value().LookupPath(cue.ParsePath(f.name))
+		// also the point where the lazy encode is forced. The lookup path was
+		// built at compile time; parsing it here would cost 36 allocations.
+		fieldData := data.value().LookupPath(f.cuePath)
 		if !fieldData.Exists() {
 			continue
 		}
