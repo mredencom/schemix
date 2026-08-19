@@ -45,7 +45,7 @@ Two notes on fairness:
 | go-playground/validator | 784 ns | 163 B | 6 |
 | ozzo-validation | 1.72 µs | 2.30 KiB | 37 |
 | jsonschema v6 | 1.87 µs | 2.06 KiB | 56 |
-| schemix — `Validate`, one `@blob()` rule | 6.44 µs | 10.74 KiB | 127 |
+| schemix — `Validate`, one `@blob()` rule | 4.82 µs | 9.03 KiB | 91 |
 | raw `cuelang.org/go` API | 12.86 µs | 24.87 KiB | 186 |
 
 ### Scalar — invalid payload (error path)
@@ -72,7 +72,7 @@ lives on the stack. Only the message itself is larger than before.
 |---------|------|--------|--------|
 | go-playground/validator | 1.05 µs | 270 B | 10 |
 | jsonschema v6 | 4.35 µs | 5.43 KiB | 133 |
-| schemix | 27.35 µs | 37.63 KiB | 432 |
+| schemix | 23.77 µs | 34.30 KiB | 360 |
 
 ### End-to-end, JSON bytes in
 
@@ -92,8 +92,12 @@ Decoding dominates: schemix's own validation is 382 ns of that 1.69 µs.
 | Library | Time | Memory | Allocs |
 |---------|------|--------|--------|
 | go-playground/validator (first struct, cache warm-up) | 10.11 µs | 17.18 KiB | 246 |
-| schemix — `New` | 43.97 µs | 90.06 KiB | 765 |
+| schemix — `New` | 56.59 µs | 125.1 KiB | 938 |
 | jsonschema v6 — compile | 65.97 µs | 76.98 KiB | 1101 |
+
+`New` grew from 765 to 938 allocations when descriptor work moved to compile
+time: field lookup paths, list element descriptors, and enum membership sets are
+all built once here so that no validation pays for them.
 
 ### Parallel, 10 cores
 
@@ -120,7 +124,7 @@ The encode still happens, unavoidably, when any of these appear:
 |---------|-----|
 | `@blob()` rule on a **present** field | the field's CUE constraint is verified before the rule runs |
 | Nested struct | container navigation uses `LookupPath` |
-| Array | the whole list goes to `cue.Value.Unify` |
+| List of **struct** elements | the whole list goes to `cue.Value.Unify`; a list of scalars does not |
 | Constraint too complex for a descriptor | no `fastConstraint` extracted |
 | `uint*` value on an `int` constraint | the fast path returns `Handled=false` and falls back to CUE for exactness |
 
@@ -154,20 +158,20 @@ enum), only the container changes:
 
 | Container | Time | Allocs | vs. fast path |
 |-----------|------|--------|---------------|
-| Scalars at top level (fully fast-pathed) | **105 ns** | **0** | 1x |
-| Same scalars inside a nested struct | 3.90 µs | 90 | 37x |
-| Same scalars inside an array of **one** struct element | 13.46 µs | 225 | **128x** |
+| Scalars at top level (fully fast-pathed) | **128 ns** | **0** | 1x |
+| Same scalars inside a nested struct | 2.49 µs | 54 | 19x |
+| Same scalars inside an array of **one** struct element | 11.82 µs | 189 | **93x** |
 
 Struct-element array cost is strictly linear in element count, at roughly
-**6.5 µs and 78 allocations per element**:
+**6.8 µs and 74 allocations per element**:
 
 | Elements | 1 | 3 | 10 | 50 | 100 |
 |----------|---|---|----|----|-----|
-| Time | 13.5 µs | 27.1 µs | 74.2 µs | 342 µs | 639 µs |
-| Allocs | 225 | 382 | 926 | 4021 | 7899 |
+| Time | 11.7 µs | 25.0 µs | 71.2 µs | 314 µs | 624 µs |
+| Allocs | 189 | 346 | 890 | 3985 | 7859 |
 
-Struct nesting, by contrast, grows at about **2.1 µs per level** (depth 1 / 3 /
-10 → 2.91 / 7.14 / 22.14 µs) — the leaves are fast, the navigation is not.
+Struct nesting, by contrast, grows at about **0.6 µs per level** (depth 1 / 3 /
+10 → 1.49 / 2.66 / 6.89 µs) — the leaves are fast, the navigation is not.
 
 ### Mitigation
 
@@ -178,9 +182,9 @@ and guarded by [`TestArrayWorkaroundIsEquivalent`](comparison_test.go):
 
 | Elements | Whole list | Per-element `Validator` | Speedup |
 |----------|------------|-------------------------|---------|
-| 3 | 26.70 µs / 382 allocs | **327 ns / 0 allocs** | **82x** |
-| 10 | 72.46 µs / 926 allocs | **1.16 µs / 0 allocs** | **62x** |
-| 50 | 358.1 µs / 4021 allocs | **5.77 µs / 0 allocs** | **62x** |
+| 3 | 24.79 µs / 346 allocs | **328 ns / 0 allocs** | **76x** |
+| 10 | 68.72 µs / 890 allocs | **1.11 µs / 0 allocs** | **62x** |
+| 50 | 314.3 µs / 3983 allocs | **5.69 µs / 0 allocs** | **55x** |
 
 Per-element validation is allocation-free at every size. The tradeoff: you lose
 list-level constraints, and per-element error paths are no longer prefixed with

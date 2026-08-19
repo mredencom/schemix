@@ -24,14 +24,14 @@ CUE constraints + Bloblang dynamic expressions, unified.
 graph TD
     SRC["<b>CUE schema text</b><br/>constraints · @blob · @meta<br/>compiled once by New()"]:::schema
 
-    SRC --> FAST["<b>fastConstraint</b><br/>scalars only"]:::fast
-    SRC --> CV["<b>CUE schema value</b><br/>structs · arrays"]:::slow
+    SRC --> FAST["<b>fastConstraint</b><br/>scalars · scalar lists"]:::fast
+    SRC --> CV["<b>CUE schema value</b><br/>structs · struct lists"]:::slow
 
     FAST --> L1["<b>Layer 1</b> · constraint check"]:::layer
     CV --> L1
 
-    L1 -->|all fields scalar| Z["<b>Go fast path</b><br/>no cue.Value · 0 alloc"]:::fast
-    L1 -->|struct · array · blob| E["<b>lazy Encode</b><br/>LookupPath · Unify"]:::slow
+    L1 -->|every field has a descriptor| Z["<b>Go fast path</b><br/>no cue.Value · 0 alloc"]:::fast
+    L1 -->|struct · struct list · blob| E["<b>lazy Encode</b><br/>LookupPath · Unify"]:::slow
 
     Z --> L2["<b>Layer 2</b> · @blob + @meta<br/>on the raw Go map"]:::layer
     E --> L2
@@ -853,9 +853,9 @@ Apple M4, Go 1.25.11, `benchstat` medians. Time / allocations per operation:
 | Scalar, invalid | **1.06 µs · 15** | 733 ns · 25 | 2.05 µs · 49 | 2.13 µs · 81 | 16.30 µs · 301 |
 | Parallel, 10 cores | **~100 ns · 0** | 247 ns · 6 | — | 785 ns · 56 | — |
 | JSON bytes, end-to-end | 1.69 µs · 31 | 1.50 µs · 14 | 2.52 µs · 45 | 2.82 µs · 80 | — |
-| Nested + 3-item array | 27.35 µs · 432 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
-| With one `@blob()` rule | 6.44 µs · 127 | not supported | not supported | not supported | — |
-| Compile (once at startup) | 43.97 µs | 10.11 µs | — | 65.97 µs | — |
+| Nested + 3-item array | 23.77 µs · 360 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
+| With one `@blob()` rule | 4.82 µs · 91 | not supported | not supported | not supported | — |
+| Compile (once at startup) | 56.59 µs | 10.11 µs | — | 65.97 µs | — |
 
 Capabilities, where the difference is structural rather than a matter of
 nanoseconds:
@@ -883,7 +883,7 @@ Two honest boundaries on that headline:
   fast path, allocation-free. A list of **structs** (`[...{…}]`) has no such
   descriptor, so the whole list goes to `cue.Value.Unify` at ~6.5 µs per element;
   validating those element-by-element against a per-element `Validator` is
-  [measured 62-82x faster](benchmarks/comparison/README.md#mitigation).
+  [measured 55-76x faster](benchmarks/comparison/README.md#mitigation).
 
 What schemix offers that raw throughput does not cover: the schema is
 hot-loadable text rather than compiled Go, plus computed fields (`@blob()`),

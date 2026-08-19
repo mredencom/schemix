@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
-- Constraints the Go-native fast path cannot represent exactly are no longer silently dropped. A field carrying a conjunct outside the descriptor's vocabulary — a second regex (`=~"^a" & =~"b$"`), a `!=` bound (`string & !=""`, `int & >0 & !=5`), a builtin call (`strings.MinRunes(3)`, `math.MultipleOf(0.5)`), or a concrete literal (`n: 5`, `s: "hello"`, `b: true`) — now falls back to CUE and is validated in full. Previously the descriptor kept only the part it understood and reported `Valid=true` with no errors, so such fields accepted invalid data. Verdicts change from accept to reject for input that violates the dropped conjunct.
+- Constraints the Go-native fast path cannot represent exactly are no longer silently dropped. A field carrying a conjunct outside the descriptor's vocabulary — a second regex (`=~"^a" & =~"b$"`), a `!=` bound (`string & !=""`, `int & >0 & !=5`), a builtin call (`strings.MinRunes(3)`, `math.MultipleOf(0.5)`), a concrete literal (`n: 5`, `s: "hello"`, `b: true`), or a default marker (`*10 | int & >=0`, where CUE folds the disjunction and hides the `>=0`) — now falls back to CUE and is validated in full. Previously the descriptor kept only the part it understood and reported `Valid=true` with no errors, so such fields accepted invalid data. Verdicts change from accept to reject for input that violates the dropped conjunct.
+- Integer values supplied to CUE `float` fields now fail with `E1T01`. CUE keeps `int` and `float` as sibling subtypes of `number`, so `r: float` rejects `50` and accepts `50.0`; the fast path previously accepted either. This affected bare `float`, float ranges, float enums, and lists of floats. Declare the field `number` to accept both, which is what CUE itself does.
 - Non-nullable fields receiving `nil` now fail with `E1M01`.
 - Go floating-point values supplied to CUE `int` fields now fail with `E1T01`, even when mathematically integral.
 - Non-bool `@blob()` results are checked against the field schema; mismatches fail with `E2T01`.
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | Change | Required action |
 |--------|-----------------|
 | Unrepresentable constraint now enforced | None for correct data. Input that violated a previously dropped conjunct now fails, which is the intended verdict; the affected field costs more than a fast-path field because CUE decides it. |
+| Integer value on a `float` field (`E1T01`) | Declare the field `number` if it should accept both, or pass a Go float (`50.0`, not `50`). |
 | Attribute inside an array element | Move it to the array field itself: `items: [...{qty: int}] @blob(this.items.all(i -> i.qty > 0))`. Computed element fields must be declared optional (`subtotal?: number`) because CUE runs before `@blob`. |
 | Attribute on a definition | Move it to the field that references the definition: `pan: #PAN @blob(this.pan.luhn_valid())`. |
 | Non-nullable `nil` | Declare nullable fields as `null \| T`; do not use `nil` for non-nullable fields. |

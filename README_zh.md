@@ -24,14 +24,14 @@ CUE 约束 + Bloblang 动态表达式，统一。
 graph TD
     SRC["<b>CUE schema 文本</b><br/>约束 · @blob · @meta<br/>由 New() 编译一次"]:::schema
 
-    SRC --> FAST["<b>fastConstraint</b><br/>仅标量"]:::fast
-    SRC --> CV["<b>CUE schema 值</b><br/>结构体 · 数组"]:::slow
+    SRC --> FAST["<b>fastConstraint</b><br/>标量 · 标量列表"]:::fast
+    SRC --> CV["<b>CUE schema 值</b><br/>结构体 · 结构体列表"]:::slow
 
     FAST --> L1["<b>第 1 层</b> · 约束校验"]:::layer
     CV --> L1
 
-    L1 -->|全部字段皆标量| Z["<b>Go 快速路径</b><br/>无 cue.Value · 零分配"]:::fast
-    L1 -->|结构体 · 数组 · blob| E["<b>惰性 Encode</b><br/>LookupPath · Unify"]:::slow
+    L1 -->|每个字段都有描述符| Z["<b>Go 快速路径</b><br/>无 cue.Value · 零分配"]:::fast
+    L1 -->|结构体 · 结构体列表 · blob| E["<b>惰性 Encode</b><br/>LookupPath · Unify"]:::slow
 
     Z --> L2["<b>第 2 层</b> · @blob + @meta<br/>在原始 Go map 上求值"]:::layer
     E --> L2
@@ -832,9 +832,9 @@ Apple M4、Go 1.25.11，`benchstat` 中位数。每次操作的耗时 / 分配�
 | 标量，非法 | **1.06 µs · 15** | 733 ns · 25 | 2.05 µs · 49 | 2.13 µs · 81 | 16.30 µs · 301 |
 | 并行，10 核 | **~100 ns · 0** | 247 ns · 6 | — | 785 ns · 56 | — |
 | JSON 字节，端到端 | 1.69 µs · 31 | 1.50 µs · 14 | 2.52 µs · 45 | 2.82 µs · 80 | — |
-| 嵌套 + 3 元素数组 | 27.35 µs · 432 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
-| 含一条 `@blob()` | 6.44 µs · 127 | 不支持 | 不支持 | 不支持 | — |
-| 编译（启动时一次） | 43.97 µs | 10.11 µs | — | 65.97 µs | — |
+| 嵌套 + 3 元素数组 | 23.77 µs · 360 | 1.05 µs · 10 | — | 4.35 µs · 133 | — |
+| 含一条 `@blob()` | 4.82 µs · 91 | 不支持 | 不支持 | 不支持 | — |
+| 编译（启动时一次） | 56.59 µs | 10.11 µs | — | 65.97 µs | — |
 
 能力差异是结构性的，不是纳秒级的：
 
@@ -860,7 +860,7 @@ Apple M4、Go 1.25.11，`benchstat` 中位数。每次操作的耗时 / 分配�
   `[...int & >0]`、`[..."A" | "B"]` —— 完全由快速路径处理，零分配。
   元素为**结构体**的列表（`[...{…}]`）没有对应的描述符，整个 list 交给
   `cue.Value.Unify`，约每元素 6.5 µs；这类集合改用「按元素校验」——
-  [实测快 62-82 倍](benchmarks/comparison/README.md#mitigation)。
+  [实测快 55-76 倍](benchmarks/comparison/README.md#mitigation)。
 
 schemix 提供的、纯吞吐指标覆盖不到的能力：schema 是可热加载的文本而非编译进
 二进制的 Go 代码，外加计算字段（`@blob()`）、动态表达式、结构化错误码、
