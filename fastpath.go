@@ -55,6 +55,13 @@ type fastConstraint struct {
 // extractFastConstraint analyzes a CUE field schema at compile time and
 // attempts to extract a pure-Go constraint descriptor. Returns nil if
 // the field has complex constraints that require CUE evaluation.
+//
+// The descriptor's vocabulary is deliberately narrow: bare types, one regex,
+// numeric ranges, and literal enums. Every extractor below is therefore
+// *exhaustive* — it inspects each conjunct in the expression tree and returns
+// nil the moment it meets one it cannot represent. Serving a field from a
+// descriptor that silently omits a conjunct would let invalid data pass, so an
+// unrepresentable constraint must fall back to CUE (fail closed).
 func extractFastConstraint(schema cue.Value) *fastConstraint {
 	// Eval() resolves definition references (e.g. #PAN → =~"^[0-9]{16}$")
 	schema = schema.Eval()
@@ -70,11 +77,28 @@ func extractFastConstraint(schema cue.Value) *fastConstraint {
 	case cue.NumberKind:
 		return extractNumberConstraint(schema)
 	case cue.BoolKind:
+		if !isBareType(schema) {
+			// A concrete `true`/`false` is an equality constraint, not a type.
+			return nil
+		}
 		return &fastConstraint{kind: constraintType, expectBool: true}
 	default:
 		// struct, list, or complex — no fast path
 		return nil
 	}
+}
+
+// isBareType reports whether v is an unadorned type declaration such as
+// `string` or `int`, carrying neither a concrete value nor any conjunct.
+//
+// Both halves matter. A non-NoOp expression means conjuncts the caller has not
+// accounted for; a concrete value means equality, which no descriptor kind
+// expresses. Either way the field belongs on the CUE path.
+func isBareType(v cue.Value) bool {
+	if op, _ := v.Expr(); op != cue.NoOp {
+		return false
+	}
+	return !v.IsConcrete()
 }
 
 // extractStringConstraint handles string fields: pure string, regex, or enum.
@@ -88,17 +112,71 @@ func extractStringConstraint(schema cue.Value) *fastConstraint {
 		}
 	}
 
-	// Check for regex bound (=~"pattern")
-	if re := extractRegex(schema); re != nil {
+	re, exhaustive := scanStringConjuncts(schema)
+	if !exhaustive {
+		return nil
+	}
+	if re != nil {
 		return &fastConstraint{
 			kind:         constraintRegex,
 			expectString: true,
 			regex:        re,
 		}
 	}
-
-	// Pure string type check
 	return &fastConstraint{kind: constraintType, expectString: true}
+}
+
+// scanStringConjuncts walks a string field's expression tree and reports the
+// single regex it carries, if any.
+//
+// exhaustive is false when the tree holds anything the descriptor cannot
+// express: a second regex (only one can be stored), a `!=` bound, a builtin
+// call such as strings.MinRunes, a disjunction, or a concrete literal.
+func scanStringConjuncts(v cue.Value) (re *regexp.Regexp, exhaustive bool) {
+	op, vals := v.Expr()
+	switch op {
+	case cue.NoOp:
+		if v.IsConcrete() {
+			// A concrete `"hello"` constrains by equality, not by type.
+			return nil, false
+		}
+		return nil, true
+
+	case cue.RegexMatchOp:
+		if len(vals) < 1 {
+			return nil, false
+		}
+		pattern, err := vals[0].String()
+		if err != nil {
+			return nil, false
+		}
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, false
+		}
+		return compiled, true
+
+	case cue.AndOp:
+		for _, sub := range vals {
+			subRe, ok := scanStringConjuncts(sub)
+			if !ok {
+				return nil, false
+			}
+			if subRe == nil {
+				continue
+			}
+			if re != nil {
+				// Two patterns must both hold; the descriptor stores one.
+				return nil, false
+			}
+			re = subRe
+		}
+		return re, true
+
+	default:
+		// NotEqualOp, CallOp, OrOp, … — outside the descriptor's vocabulary.
+		return nil, false
+	}
 }
 
 // extractIntConstraint handles int fields: pure int, range, or enum.
@@ -117,7 +195,10 @@ func extractIntConstraint(schema cue.Value) *fastConstraint {
 		return fc
 	}
 
-	// Pure int type check
+	// No range extracted: only a bare `int` may be served as a type check.
+	if !isBareType(schema) {
+		return nil
+	}
 	return &fastConstraint{kind: constraintType, expectInt: true}
 }
 
@@ -134,6 +215,9 @@ func extractFloatConstraint(schema cue.Value) *fastConstraint {
 	if fc := extractNumericRange(schema, false); fc != nil {
 		return fc
 	}
+	if !isBareType(schema) {
+		return nil
+	}
 	return &fastConstraint{kind: constraintType, expectFloat: true}
 }
 
@@ -144,7 +228,7 @@ func extractNumberConstraint(schema cue.Value) *fastConstraint {
 		fc.expectNumber = true
 		return fc
 	}
-	if op, _ := schema.Expr(); op != cue.NoOp {
+	if !isBareType(schema) {
 		// A constrained number that cannot be represented exactly by the fast
 		// descriptor must remain on the CUE correctness path.
 		return nil
@@ -218,41 +302,15 @@ func extractFloatEnums(v cue.Value) []float64 {
 	return enums
 }
 
-// extractRegex tries to extract a regex pattern from a bound expression (=~"pattern").
-func extractRegex(v cue.Value) *regexp.Regexp {
-	op, vals := v.Expr()
-
-	// Direct bound: =~"pattern" — op is RegexMatchOp, vals[0] is the pattern string
-	if op == cue.RegexMatchOp && len(vals) >= 1 {
-		pattern, err := vals[0].String()
-		if err != nil {
-			return nil
-		}
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil
-		}
-		return re
-	}
-
-	// Conjunction: string & =~"pattern" (less common, but possible)
-	if op == cue.AndOp {
-		for _, sub := range vals {
-			if re := extractRegex(sub); re != nil {
-				return re
-			}
-		}
-	}
-
-	return nil
-}
-
 // extractNumericRange tries to extract range bounds from an int/float field.
 // e.g. int & >0 & <=100
 // CUE Expr structure for "int & >=0 & <=150":
 //
 //	Top: AndOp, vals = [int&>=0 (nested And), <=150 (LessThanEqualOp)]
 //	Each bound op has subVals[0] as the bound value.
+//
+// Returns nil unless every conjunct in the tree is a bound the descriptor can
+// hold, so a schema like `int & >0 & !=5` stays on the CUE path.
 func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 	op, vals := v.Expr()
 
@@ -275,8 +333,11 @@ func extractNumericRange(v cue.Value, isInt bool) *fastConstraint {
 }
 
 // extractBoundsRecursive traverses the expression tree to find all bound operators.
-// exact is false when an integer bound cannot be represented as int64, which
-// disables the fast path so CUE remains the correctness oracle.
+//
+// exact is false whenever a conjunct cannot be represented exactly: an integer
+// bound outside int64, or any operator outside the four comparisons — `!=`, a
+// builtin call such as math.MultipleOf, a nested disjunction, or a concrete
+// literal. In every such case CUE remains the correctness oracle.
 func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exact bool) {
 	for _, sub := range vals {
 		subOp, subVals := sub.Expr()
@@ -295,6 +356,14 @@ func extractBoundsRecursive(vals []cue.Value, fc *fastConstraint) (hasBound, exa
 				return hasBound || nestedBound, false
 			}
 			hasBound = hasBound || nestedBound
+		case cue.NoOp:
+			// The bare `int` / `float` / `number` the bounds are conjoined with.
+			// A concrete literal here is an equality the bounds do not capture.
+			if sub.IsConcrete() {
+				return hasBound, false
+			}
+		default:
+			return hasBound, false
 		}
 	}
 	return hasBound, true
