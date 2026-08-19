@@ -99,14 +99,30 @@ func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, raw
 			if fr.Handled {
 				if !fr.Valid {
 					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Code:       fr.Code,
-						Path:       f.path,
-						Type:       TypeCUE,
-						Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
-						FieldType:  f.fieldType,
-						Suggestion: fr.Suggestion,
-					})
+					if len(fr.ElemFailures) > 0 {
+						// A list reports one error per offending element, indexed
+						// the same way CUE does: items[1], not items.
+						for _, ef := range fr.ElemFailures {
+							ePath := indexedPath(f.path, ef.Index)
+							result.Errors = append(result.Errors, ValidationError{
+								Code:       ef.Code,
+								Path:       ePath,
+								Type:       TypeCUE,
+								Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
+								FieldType:  f.fieldType,
+								Suggestion: ef.Suggestion,
+							})
+						}
+					} else {
+						result.Errors = append(result.Errors, ValidationError{
+							Code:       fr.Code,
+							Path:       f.path,
+							Type:       TypeCUE,
+							Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
+							FieldType:  f.fieldType,
+							Suggestion: fr.Suggestion,
+						})
+					}
 				}
 				continue
 			}
@@ -292,6 +308,17 @@ func (v *Validator) validateCUERecursive(schema, data cue.Value, prefix string, 
 }
 
 // ─── Global Validator Store ──────────────────────────────────────────────────
+
+// indexedPath renders the path of a list element as parent[i], matching the
+// form formatCUEErrorPath produces for errors that come back from CUE.
+func indexedPath(parent string, index int) string {
+	buf := make([]byte, 0, len(parent)+12)
+	buf = append(buf, parent...)
+	buf = append(buf, '[')
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, ']')
+	return string(buf)
+}
 
 // formatCUEErrorPath formats a structured CUE error path using Go-style array indices.
 func formatCUEErrorPath(parent string, err error) string {

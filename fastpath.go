@@ -18,6 +18,7 @@ const (
 	constraintRegex                       // string + regex match
 	constraintRange                       // numeric range bounds
 	constraintEnum                        // string/int enum set
+	constraintList                        // open list, every element checked by elem
 )
 
 // fastConstraint holds pre-extracted Go-native constraint data for a single field.
@@ -50,6 +51,9 @@ type fastConstraint struct {
 	stringEnums []string
 	intEnums    []int64
 	floatEnums  []float64
+
+	// List constraint: the descriptor every element must satisfy (constraintList).
+	elem *fastConstraint
 }
 
 // extractFastConstraint analyzes a CUE field schema at compile time and
@@ -64,6 +68,7 @@ type fastConstraint struct {
 // unrepresentable constraint must fall back to CUE (fail closed).
 func extractFastConstraint(schema cue.Value) *fastConstraint {
 	// Eval() resolves definition references (e.g. #PAN → =~"^[0-9]{16}$")
+	raw := schema
 	schema = schema.Eval()
 	kind := schema.IncompleteKind()
 
@@ -82,10 +87,65 @@ func extractFastConstraint(schema cue.Value) *fastConstraint {
 			return nil
 		}
 		return &fastConstraint{kind: constraintType, expectBool: true}
+	case cue.ListKind:
+		return extractListConstraint(schema, raw)
 	default:
-		// struct, list, or complex — no fast path
+		// struct or complex — no fast path
 		return nil
 	}
+}
+
+// extractListConstraint handles an open list whose verdict reduces to checking
+// every element against one scalar descriptor, e.g. [...string] or [...int & >0].
+//
+// Returns nil for any other list shape, because their verdicts do not reduce
+// that way:
+//
+//   - `[...string] & list.MinItems(2)` — a list-level conjunct.
+//   - `[string, string]` — fixed arity; a wrong length is an error in itself.
+//   - `[string, ...int]` — the head element has its own constraint.
+//   - `[...string] | [...int]` — either branch may match, so no single element
+//     descriptor decides the list.
+//   - `[...{…}]` — struct elements.
+//   - `[...[...string]]` — nested lists; see the elem.kind check below.
+//
+// evaluated has definition references resolved, raw has not. Both are needed:
+// Eval() flattens a disjunction of list types down to its first branch, so
+// `[...string] | [...int]` arrives here looking exactly like `[...string]`, and
+// only raw still carries the OrOp that must disqualify it.
+func extractListConstraint(evaluated, raw cue.Value) *fastConstraint {
+	// Any conjunct or disjunct at the list level puts the verdict beyond a
+	// per-element check.
+	if op, _ := raw.Expr(); op != cue.NoOp {
+		return nil
+	}
+	if op, _ := evaluated.Expr(); op != cue.NoOp {
+		return nil
+	}
+
+	// A fixed-position element means arity matters, or that element carries its
+	// own constraint. Either way this is not a uniform open list.
+	iter, err := evaluated.List()
+	if err != nil || iter.Next() {
+		return nil
+	}
+
+	elemSchema := evaluated.LookupPath(cue.MakePath(cue.AnyIndex))
+	if !elemSchema.Exists() {
+		return nil
+	}
+
+	elem := extractFastConstraint(elemSchema)
+	if elem == nil {
+		return nil
+	}
+	if elem.kind == constraintList {
+		// A nested list would need a compound index such as m[0][1], but
+		// fastElemFailure carries a single index, so the inner one would be lost
+		// and the reported path would point at the wrong element.
+		return nil
+	}
+	return &fastConstraint{kind: constraintList, elem: elem}
 }
 
 // isBareType reports whether v is an unadorned type declaration such as
@@ -432,6 +492,21 @@ type fastResult struct {
 	// Suggestion carries the closest valid value for enum violations. Empty for
 	// every other constraint kind — see ValidationError.Suggestion.
 	Suggestion string
+
+	// ElemFailures is set only by constraintList, one entry per rejected element.
+	// CUE reports every offending element rather than stopping at the first, so
+	// the fast path must too. Nil for every other constraint kind, which keeps
+	// the scalar path allocation-free.
+	ElemFailures []fastElemFailure
+}
+
+// fastElemFailure describes one rejected element of a list, carrying the index
+// the error path needs.
+type fastElemFailure struct {
+	Index      int
+	Code       ErrorCode
+	Detail     string
+	Suggestion string
 }
 
 // fallbackToCUE signals that the fast path cannot precisely evaluate this
@@ -474,9 +549,55 @@ func validateFast(fc *fastConstraint, val any) fastResult {
 		return validateFastRange(fc, val)
 	case constraintEnum:
 		return validateFastEnum(fc, val)
+	case constraintList:
+		return validateFastList(fc, val)
 	default:
 		return pass() // should not reach here
 	}
+}
+
+// validateFastList checks every element of a list against fc.elem.
+//
+// Only []any is served. A concretely typed slice such as []string would need a
+// reflect-based walk, and CUE already handles it correctly, so it falls back
+// rather than grow a second code path.
+//
+// If any single element cannot be decided — an unsigned integer, say — the whole
+// list falls back to CUE. Accepting the elements the descriptor happens to
+// understand while ignoring one it does not would be the same fail-open bug the
+// scalar descriptors were fixed for.
+func validateFastList(fc *fastConstraint, val any) fastResult {
+	items, ok := val.([]any)
+	if !ok {
+		// Not a list at all, or a typed slice. CUE decides.
+		return fallbackToCUE()
+	}
+
+	var failures []fastElemFailure
+	for i, item := range items {
+		er := validateFast(fc.elem, item)
+		if !er.Handled {
+			return fallbackToCUE()
+		}
+		if er.Valid {
+			continue
+		}
+		if failures == nil {
+			// Most lists are valid; allocate only once a rejection is certain.
+			failures = make([]fastElemFailure, 0, len(items)-i)
+		}
+		failures = append(failures, fastElemFailure{
+			Index:      i,
+			Code:       er.Code,
+			Detail:     er.Detail,
+			Suggestion: er.Suggestion,
+		})
+	}
+
+	if failures == nil {
+		return pass()
+	}
+	return fastResult{Handled: true, Valid: false, ElemFailures: failures}
 }
 
 func validateFastType(fc *fastConstraint, val any) fastResult {

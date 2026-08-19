@@ -141,8 +141,10 @@ func compileCUEFields(schema cue.Value, prefix string) []cueField {
 			f.children = compileCUEFields(fieldSchema, fullPath)
 		}
 
-		// Optimization #4: extract Go-native fast constraint for scalar fields
-		if !f.hasBlob && !f.isStruct && !f.isList {
+		// Optimization #4: extract Go-native fast constraint. Scalars and open
+		// lists of scalars qualify; a @blob field is computed rather than checked
+		// here, and a struct is validated by recursing into children.
+		if !f.hasBlob && !f.isStruct {
 			f.fast = extractFastConstraint(fieldSchema)
 		}
 

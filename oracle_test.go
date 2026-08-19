@@ -143,6 +143,38 @@ func TestOracle_FastPathVsCUE(t *testing.T) {
 
 		// A range conjoined with a concrete value the descriptor would ignore.
 		{"range-and-concrete/violated", `{ n: int & >=0 & <=10 & 7 }`, map[string]any{"n": int64(3)}},
+
+		// ── Lists whose elements are scalars ─────────────────────────────────
+		{"list-string/valid", `{ tags: [...string] }`, map[string]any{"tags": []any{"a", "b"}}},
+		{"list-string/empty", `{ tags: [...string] }`, map[string]any{"tags": []any{}}},
+		{"list-string/first-violated", `{ tags: [...string] }`, map[string]any{"tags": []any{int64(1), "b"}}},
+		{"list-string/all-violated", `{ tags: [...string] }`, map[string]any{"tags": []any{int64(1), int64(2)}}},
+		{"list-string/nil-element", `{ tags: [...string] }`, map[string]any{"tags": []any{nil}}},
+		{"list-string/not-a-list", `{ tags: [...string] }`, map[string]any{"tags": "nope"}},
+		{"list-string/typed-slice", `{ tags: [...string] }`, map[string]any{"tags": []string{"a", "b"}}},
+		{"list-regex/valid", `{ p: [...=~"^[0-9]{2}$"] }`, map[string]any{"p": []any{"12", "34"}}},
+		{"list-regex/violated", `{ p: [...=~"^[0-9]{2}$"] }`, map[string]any{"p": []any{"12", "abc"}}},
+		{"list-int-range/valid", `{ n: [...int & >0] }`, map[string]any{"n": []any{int64(1), int64(2)}}},
+		{"list-int-range/violated", `{ n: [...int & >0] }`, map[string]any{"n": []any{int64(1), int64(-1)}}},
+		{"list-int-range/uint-element", `{ n: [...int & >0] }`, map[string]any{"n": []any{uint64(5)}}},
+		{"list-enum/valid", `{ c: [..."a" | "b"] }`, map[string]any{"c": []any{"a", "b"}}},
+		{"list-enum/violated", `{ c: [..."a" | "b"] }`, map[string]any{"c": []any{"z"}}},
+		{"list-bool/violated", `{ b: [...bool] }`, map[string]any{"b": []any{true, "yes"}}},
+		{"list-float/violated", `{ r: [...float & <=1.0] }`, map[string]any{"r": []any{0.5, 2.0}}},
+
+		// Shapes the descriptor must refuse, so CUE keeps deciding. A list-level
+		// conjunct, a fixed-position element, or a disjunction of two list types
+		// all evaluate differently from a plain open list of scalars.
+		{"list-minitems/violated", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", map[string]any{"tags": []any{"a"}}},
+		{"list-minitems/satisfied", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", map[string]any{"tags": []any{"a", "b"}}},
+		{"list-tuple/valid", `{ p: [string, string] }`, map[string]any{"p": []any{"a", "b"}}},
+		{"list-tuple/wrong-arity", `{ p: [string, string] }`, map[string]any{"p": []any{"a"}}},
+		{"list-half-open/valid", `{ p: [string, ...int] }`, map[string]any{"p": []any{"a", int64(1)}}},
+		{"list-half-open/violated", `{ p: [string, ...int] }`, map[string]any{"p": []any{int64(1), int64(2)}}},
+		{"list-disjunction/int-branch", `{ tags: [...string] | [...int] }`, map[string]any{"tags": []any{int64(1)}}},
+		{"list-disjunction/string-branch", `{ tags: [...string] | [...int] }`, map[string]any{"tags": []any{"a"}}},
+		{"list-struct-element/valid", `{ items: [...{qty: int}] }`, map[string]any{"items": []any{map[string]any{"qty": int64(1)}}}},
+		{"list-nested-list", `{ m: [...[...string]] }`, map[string]any{"m": []any{[]any{"a"}}}},
 	}
 
 	fastOnlyGuards := map[string]bool{

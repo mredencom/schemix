@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"math"
+	"slices"
 	"testing"
 )
 
@@ -373,3 +374,230 @@ func TestNumericFastpathTypes(t *testing.T) {
 // =============================================================================
 // Nil / nullable / optional handling tests
 // =============================================================================
+
+// ─── Lists of scalar elements ───────────────────────────────────────────────
+//
+// A list has no fast descriptor, so the whole value goes to cue.Value.Unify:
+// measured 6367 ns and 116 allocations for a single-element [...string], against
+// 54 ns and zero allocations for three scalar fields. When every element is a
+// scalar the descriptor already knows how to check, that cost buys nothing.
+
+// TestListFastpath_ServesScalarElementLists asserts the descriptor is extracted
+// for an open list of scalars and that it handles the value, which is what lets
+// the encode be skipped.
+func TestListFastpath_ServesScalarElementLists(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		field  string
+		input  map[string]any
+	}{
+		{"strings", `{ tags: [...string] }`, "tags", map[string]any{"tags": []any{"a", "b"}}},
+		{"empty", `{ tags: [...string] }`, "tags", map[string]any{"tags": []any{}}},
+		{"ints-with-range", `{ n: [...int & >0] }`, "n", map[string]any{"n": []any{int64(1), int64(2)}}},
+		{"floats", `{ r: [...float & <=1.0] }`, "r", map[string]any{"r": []any{0.25, 0.5}}},
+		{"regex", `{ p: [...=~"^[0-9]{2}$"] }`, "p", map[string]any{"p": []any{"12"}}},
+		{"enum", `{ c: [..."a" | "b"] }`, "c", map[string]any{"c": []any{"a"}}},
+		{"bools", `{ b: [...bool] }`, "b", map[string]any{"b": []any{true, false}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v := MustNew(tc.schema, WithMetricsRecorder(rec))
+
+			r := v.Process(tc.input)
+			if !r.Valid {
+				t.Fatalf("expected valid input to pass, got errors=%v", r.Errors)
+			}
+
+			rec.mu.Lock()
+			calls := append([]fastpathObservation(nil), rec.fastpathCalls...)
+			rec.mu.Unlock()
+
+			var served bool
+			for _, c := range calls {
+				if c.fieldPath == tc.field {
+					if !c.hit {
+						t.Fatalf("field %q held a descriptor but did not handle the value", tc.field)
+					}
+					served = true
+				}
+			}
+			if !served {
+				t.Fatalf("field %q has no fast descriptor; a list of scalars must not "+
+					"need cue.Value.Unify", tc.field)
+			}
+		})
+	}
+}
+
+// TestListFastpath_SkipsEncode pins the payoff. cue.Context.Encode alone costs
+// 39 allocations, so staying below it proves no cue.Value was built.
+func TestListFastpath_SkipsEncode(t *testing.T) {
+	v := MustNew(`{ tags: [...string] }`)
+	data := map[string]any{"tags": []any{"alpha", "beta", "gamma"}}
+
+	if ok, errs := v.Validate(data); !ok {
+		t.Fatalf("precondition failed, schema should accept data: %v", errs)
+	}
+
+	const encodeAllocs = 39
+	got := testing.AllocsPerRun(200, func() {
+		v.Validate(data)
+	})
+
+	if got >= encodeAllocs {
+		t.Errorf("Validate allocated %.0f objects, want < %d — a list of scalar "+
+			"elements still appears to build a cue.Value", got, encodeAllocs)
+	}
+}
+
+// TestListFastpath_ReportsEveryOffendingElement pins the error contract against
+// CUE: one error per rejected element, indexed, not just the first one.
+func TestListFastpath_ReportsEveryOffendingElement(t *testing.T) {
+	cases := []struct {
+		name      string
+		schema    string
+		input     map[string]any
+		wantPaths []string
+		wantCode  ErrorCode
+	}{
+		{
+			name:      "every element rejected",
+			schema:    `{ tags: [...string] }`,
+			input:     map[string]any{"tags": []any{int64(1), int64(2)}},
+			wantPaths: []string{"tags[0]", "tags[1]"},
+			wantCode:  CodeTypeMismatch,
+		},
+		{
+			name:      "trailing elements rejected",
+			schema:    `{ tags: [...string] }`,
+			input:     map[string]any{"tags": []any{"ok", int64(2), int64(3)}},
+			wantPaths: []string{"tags[1]", "tags[2]"},
+			wantCode:  CodeTypeMismatch,
+		},
+		{
+			name:      "range violated per element",
+			schema:    `{ n: [...int & >0] }`,
+			input:     map[string]any{"n": []any{int64(1), int64(-1), int64(-2)}},
+			wantPaths: []string{"n[1]", "n[2]"},
+			wantCode:  CodeRangeViolation,
+		},
+		{
+			name:      "enum violated per element",
+			schema:    `{ c: [..."a" | "b"] }`,
+			input:     map[string]any{"c": []any{"z", "y"}},
+			wantPaths: []string{"c[0]", "c[1]"},
+			wantCode:  CodeEnumInvalid,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MustNew(tc.schema).ProcessWithMode(tc.input, FailAll)
+			if got.Valid {
+				t.Fatal("expected invalid")
+			}
+
+			paths := make([]string, 0, len(got.Errors))
+			for _, e := range got.Errors {
+				paths = append(paths, e.Path)
+				if e.Code != tc.wantCode {
+					t.Errorf("error at %s has code %s, want %s", e.Path, e.Code, tc.wantCode)
+				}
+				if e.Type != TypeCUE {
+					t.Errorf("error at %s has type %q, want %q", e.Path, e.Type, TypeCUE)
+				}
+			}
+			if !slices.Equal(paths, tc.wantPaths) {
+				t.Errorf("error paths = %v, want %v", paths, tc.wantPaths)
+			}
+
+			// The same schema driven purely through CUE must agree on the paths.
+			oracle := processCUEOnly(t, tc.schema, tc.input)
+			oraclePaths := make([]string, 0, len(oracle.Errors))
+			for _, e := range oracle.Errors {
+				oraclePaths = append(oraclePaths, e.Path)
+			}
+			if !slices.Equal(paths, oraclePaths) {
+				t.Errorf("fast path reported %v, CUE oracle reported %v", paths, oraclePaths)
+			}
+		})
+	}
+}
+
+// TestListFastpath_RefusesShapesItCannotRepresent keeps the descriptor away from
+// lists whose verdict does not reduce to a per-element scalar check.
+func TestListFastpath_RefusesShapesItCannotRepresent(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		field  string
+		input  map[string]any
+	}{
+		{"list-level conjunct", "import \"list\"\n{ tags: [...string] & list.MinItems(2) }", "tags",
+			map[string]any{"tags": []any{"a", "b"}}},
+		{"fixed-arity tuple", `{ p: [string, string] }`, "p",
+			map[string]any{"p": []any{"a", "b"}}},
+		{"fixed head, open tail", `{ p: [string, ...int] }`, "p",
+			map[string]any{"p": []any{"a", int64(1)}}},
+		{"disjunction of list types", `{ tags: [...string] | [...int] }`, "tags",
+			map[string]any{"tags": []any{int64(1)}}},
+		{"struct elements", `{ items: [...{qty: int}] }`, "items",
+			map[string]any{"items": []any{map[string]any{"qty": int64(1)}}}},
+		{"nested lists", `{ m: [...[...string]] }`, "m",
+			map[string]any{"m": []any{[]any{"a"}}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v := MustNew(tc.schema, WithMetricsRecorder(rec))
+
+			r := v.Process(tc.input)
+			if !r.Valid {
+				t.Fatalf("precondition failed, schema should accept data: %v", r.Errors)
+			}
+
+			rec.mu.Lock()
+			calls := append([]fastpathObservation(nil), rec.fastpathCalls...)
+			rec.mu.Unlock()
+
+			for _, c := range calls {
+				if c.fieldPath == tc.field && c.hit {
+					t.Fatalf("field %q was served by the fast path, but %s does not "+
+						"reduce to a per-element scalar check", tc.field, tc.schema)
+				}
+			}
+		})
+	}
+}
+
+// TestListFastpath_FallsBackWhenAnElementIsUnrepresentable covers a value the
+// element descriptor cannot decide. Unsigned integers make the scalar check
+// return Handled=false, and a list must then hand the whole value to CUE rather
+// than accept the elements it happens to understand.
+func TestListFastpath_FallsBackWhenAnElementIsUnrepresentable(t *testing.T) {
+	const schema = `{ n: [...int & >0] }`
+	input := map[string]any{"n": []any{int64(1), uint64(2), int64(-3)}}
+
+	got := MustNew(schema).ProcessWithMode(input, FailAll)
+	want := processCUEOnly(t, schema, input)
+
+	if got.Valid != want.Valid {
+		t.Fatalf("Valid = %v, want %v (CUE oracle); got errors=%v, oracle errors=%v",
+			got.Valid, want.Valid, got.Errors, want.Errors)
+	}
+	gotPaths := make([]string, 0, len(got.Errors))
+	for _, e := range got.Errors {
+		gotPaths = append(gotPaths, e.Path)
+	}
+	wantPaths := make([]string, 0, len(want.Errors))
+	for _, e := range want.Errors {
+		wantPaths = append(wantPaths, e.Path)
+	}
+	if !slices.Equal(gotPaths, wantPaths) {
+		t.Errorf("error paths = %v, want %v (CUE oracle)", gotPaths, wantPaths)
+	}
+}
