@@ -376,6 +376,15 @@ Useful Bloblang array methods: `all(i -> …)`, `any(i -> …)`, `length()`,
 > dropped and invalid data would pass. The error names the offending path and the
 > supported rewrite.
 
+> **A list of scalars costs far less than a list of structs.** `[...string]`,
+> `[...int & >0]` and `[..."A" | "B"]` are checked element-by-element in pure Go
+> with no allocation, because one scalar descriptor decides every element. A list
+> of structs has no such descriptor and goes to `cue.Value.Unify` at roughly
+> 6.5 µs per element. Error paths are identical either way — `tags[1]`, one error
+> per offending element. Adding a list-level constraint (`list.MinItems`), a fixed
+> arity (`[string, string]`), or a disjunction of list types moves the field back
+> onto CUE, since none of those reduce to a per-element check.
+
 ## Custom Functions & Methods
 
 Register custom validation logic using the same API as Bloblang — isolated per Validator:
@@ -800,23 +809,31 @@ Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 430 µs | 796 KiB | 22366 |
+| `New` (compile) | 431 µs | 796 KiB | 22380 |
 | `Process` (valid) | **4.67 µs** | 11.90 KiB | 86 |
 | `Process` (invalid) | 5.59 µs | 13.14 KiB | 102 |
-| `Process` (nested) | 37.35 µs | 45.86 KiB | 492 |
+| `Process` (nested) | 26.51 µs | 42.07 KiB | 420 |
 | `Validate` (no output) | **4.82 µs** | 11.54 KiB | 82 |
 | `Process` (parallel, 10 cores) | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields` (fast path) | 146.5 ns | 0 B | 0 |
+| `ValidateFields` (fast path) | 149.0 ns | 0 B | 0 |
+| `Validate` (3 scalar lists, 1 element each) | **72.9 ns** | 0 B | 0 |
+| `Validate` (3 scalar lists, 10 elements each) | **338 ns** | 0 B | 0 |
 | `Registry.Get` | 6.25 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **175x speedup** over the CUE legacy path (146.5ns vs 25.62µs).
+> achieving about **172x speedup** over the CUE legacy path (149.0ns vs 25.62µs).
 >
 > `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
 > fast path never converts the input into a `cue.Value` at all. That is exactly
 > the 39 allocations missing from every row above compared to earlier releases
-> (`Process` 125 → 86, `Validate` 121 → 82). Nested and array schemas still
-> require the encode, which is why `Process (nested)` is unchanged at 492.
+> (`Process` 125 → 86, `Validate` 121 → 82). A schema containing a struct still
+> requires the encode, which is what `Process (nested)` measures — down from 492
+> to 420 allocations now that field lookup paths are built at compile time rather
+> than parsed on every call.
+>
+> Lists of **scalar** elements are served by the fast path too, allocation-free.
+> Lists of **struct** elements are not; see
+> [the array breakdown](benchmarks/comparison/README.md#arrays-it-depends-on-the-element).
 >
 > Pull requests also run base and head benchmarks on the same CI runner. A statistically
 > significant regression above 5% fails the benchmark gate.
@@ -859,11 +876,13 @@ is skipped entirely when every field is served by the Go-native fast path.
 
 Two honest boundaries on that headline:
 
-- Add **one `@blob()` rule, a nested struct, or an array** and the input must be
-  encoded into a `cue.Value` — cost jumps by an order of magnitude.
-- **Arrays are the weak spot**: the fast path has no list descriptor, so the whole
-  list goes to `cue.Value.Unify` at ~6.3 µs per element. Validating large
-  collections element-by-element against a per-element `Validator` is
+- Add **one `@blob()` rule or a nested struct** and the input must be encoded
+  into a `cue.Value` — cost jumps by an order of magnitude.
+- **Arrays depend on what the elements are.** A list of scalars —
+  `[...string]`, `[...int & >0]`, `[..."A" | "B"]` — is served entirely by the
+  fast path, allocation-free. A list of **structs** (`[...{…}]`) has no such
+  descriptor, so the whole list goes to `cue.Value.Unify` at ~6.5 µs per element;
+  validating those element-by-element against a per-element `Validator` is
   [measured 62-82x faster](benchmarks/comparison/README.md#mitigation).
 
 What schemix offers that raw throughput does not cover: the schema is

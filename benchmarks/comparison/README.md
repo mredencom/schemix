@@ -125,16 +125,29 @@ The encode still happens, unavoidably, when any of these appear:
 | `uint*` value on an `int` constraint | the fast path returns `Handled=false` and falls back to CUE for exactness |
 
 With the encode gone, pure constraint checking is what remains: `ValidateFields`
-runs in **146.5 ns with zero allocations**.
+runs in **149.0 ns with zero allocations**.
 
-## The array blind spot
+## Arrays: it depends on the element
 
-The fast path covers scalars only. `extractFastConstraint` returns `nil` for
-`cue.ListKind`, so an array field gets no Go-native descriptor and the **entire
-list** — every element, and every scalar constraint inside it — is handed to
-`cue.Value.Unify`. Struct fields are different: `compileCUEFields` recurses and
-gives each scalar child its own descriptor, so nested leaves stay on the fast
-path and only the container navigation touches CUE.
+An array field's cost is decided by what its elements are.
+
+**Elements that are scalars** — `[...string]`, `[...int & >0]`,
+`[..."A" | "B"]` — get an element descriptor, and `validateFastElements` applies
+it per element in pure Go. No `cue.Value` is built at all:
+
+| Three scalar-element list fields | Time | Allocs |
+|----------------------------------|------|--------|
+| 1 element each, before the descriptor existed | 22.0 µs | 365 |
+| 1 element each | **72.9 ns** | **0** |
+| 10 elements each, before | 66.2 µs | 776 |
+| 10 elements each | **338 ns** | **0** |
+
+**Elements that are structs** — `[...{…}]` — have no such descriptor, because a
+per-element check cannot express a struct's field set. The **entire list** —
+every element, and every scalar constraint inside it — is handed to
+`cue.Value.Unify`. Struct *fields* are different again: `compileCUEFields`
+recurses and gives each scalar child its own descriptor, so nested leaves stay on
+the fast path and only the container navigation touches CUE.
 
 Isolating that one variable — the same three constraints (`=~regex`, `int & >0`,
 enum), only the container changes:
@@ -143,10 +156,10 @@ enum), only the container changes:
 |-----------|------|--------|---------------|
 | Scalars at top level (fully fast-pathed) | **105 ns** | **0** | 1x |
 | Same scalars inside a nested struct | 3.90 µs | 90 | 37x |
-| Same scalars inside an array of **one** element | 13.46 µs | 225 | **128x** |
+| Same scalars inside an array of **one** struct element | 13.46 µs | 225 | **128x** |
 
-Array cost is strictly linear in element count, at roughly **6.3 µs and 78
-allocations per element**:
+Struct-element array cost is strictly linear in element count, at roughly
+**6.5 µs and 78 allocations per element**:
 
 | Elements | 1 | 3 | 10 | 50 | 100 |
 |----------|---|---|----|----|-----|
@@ -158,10 +171,10 @@ Struct nesting, by contrast, grows at about **2.1 µs per level** (depth 1 / 3 /
 
 ### Mitigation
 
-Until the list path gets its own descriptor, validate large collections
-element-by-element against a per-element `Validator` so every element takes the
-scalar fast path. Measured, and guarded by
-[`TestArrayWorkaroundIsEquivalent`](comparison_test.go):
+This applies to **struct-element** arrays only; scalar-element lists already take
+the fast path. Validate large collections element-by-element against a
+per-element `Validator` so every element takes the scalar fast path. Measured,
+and guarded by [`TestArrayWorkaroundIsEquivalent`](comparison_test.go):
 
 | Elements | Whole list | Per-element `Validator` | Speedup |
 |----------|------------|-------------------------|---------|

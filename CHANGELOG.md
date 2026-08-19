@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- Constraints the Go-native fast path cannot represent exactly are no longer silently dropped. A field carrying a conjunct outside the descriptor's vocabulary — a second regex (`=~"^a" & =~"b$"`), a `!=` bound (`string & !=""`, `int & >0 & !=5`), a builtin call (`strings.MinRunes(3)`, `math.MultipleOf(0.5)`), or a concrete literal (`n: 5`, `s: "hello"`, `b: true`) — now falls back to CUE and is validated in full. Previously the descriptor kept only the part it understood and reported `Valid=true` with no errors, so such fields accepted invalid data. Verdicts change from accept to reject for input that violates the dropped conjunct.
 - Non-nullable fields receiving `nil` now fail with `E1M01`.
 - Go floating-point values supplied to CUE `int` fields now fail with `E1T01`, even when mathematically integral.
 - Non-bool `@blob()` results are checked against the field schema; mismatches fail with `E2T01`.
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Migration
 | Change | Required action |
 |--------|-----------------|
+| Unrepresentable constraint now enforced | None for correct data. Input that violated a previously dropped conjunct now fails, which is the intended verdict; the affected field costs more than a fast-path field because CUE decides it. |
 | Attribute inside an array element | Move it to the array field itself: `items: [...{qty: int}] @blob(this.items.all(i -> i.qty > 0))`. Computed element fields must be declared optional (`subtotal?: number`) because CUE runs before `@blob`. |
 | Attribute on a definition | Move it to the field that references the definition: `pan: #PAN @blob(this.pan.luhn_valid())`. |
 | Non-nullable `nil` | Declare nullable fields as `null \| T`; do not use `nil` for non-nullable fields. |
@@ -32,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | Global Registry plugins | Create a `bloblang.Environment` and use `RegisterAllTo`, `RegisterMethodsTo`, or `RegisterFunctionsTo`. |
 
 ### Added
+- Open lists of **scalar** elements are served by the fast path, checked element-by-element in pure Go with no allocation: three such fields went from 22.0 µs / 365 allocs to **72.9 ns / 0 allocs** at one element each, and from 66.2 µs / 776 allocs to **338 ns / 0 allocs** at ten. One error per offending element, indexed as `tags[1]`, matching what CUE reports. Lists whose verdict does not reduce to a per-element scalar check are left to CUE: struct or nested-list elements, fixed arity (`[string, string]`), a fixed head element (`[string, ...int]`), a list-level conjunct (`list.MinItems`), and a disjunction of list types.
 - `WithMaxSchemaDepth(n)` — bounds how deep `New()` recurses while analysing the schema (nested structs, array element schemas, definitions). Defaults to 32. Exceeding the limit returns an error rather than silently skipping deeper levels, which could otherwise hide an unextracted `@blob`/`@meta` attribute. A non-positive value is rejected instead of meaning "unlimited".
 - `ValidationError.FieldType` — the schema type of the offending field (`string`, `int`, `list`…), resolved at compile time so the error path pays nothing for it.
 - `ValidationError.Suggestion` — the closest valid value for enum violations, via case-insensitive edit distance. Deliberately empty for range/regex/type violations, where a guess would mislead.
@@ -53,8 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom functions and methods, reusable `FuncMap`, schema composition, and introspection APIs.
 
 ### Changed
+- Field lookup paths are built once at schema compile time (`cue.MakePath`) instead of parsed on every call (`cue.ParsePath`), which ran the CUE expression parser at 1385 ns and 36 allocations per navigated field per validation. `Process` on a nested schema: 492 → **420 allocs**, 46331 → 42895 B, 30381 → 26382 ns. The scalar fast path never reaches the lookup and is unaffected.
+- Enums of `enumSetThreshold` (8) candidates or more are checked against a membership set built at compile time rather than scanned. Measured end to end: 60 candidates 75.05 → **42.39 ns**, 180 candidates 150.4 → **42.40 ns**, both allocation-free. Smaller enums keep the scan, which is genuinely faster below the threshold (3.1 ns vs 5.5 ns at three candidates), and the ordered candidate list remains the only source for error messages so their wording still follows declaration order.
 - `Registry.List()` and the package-level `List()` now return names **sorted lexicographically**. Both previously returned whatever order the backing store produced — a Go map for `Registry`, `sync.Map.Range` for the global store — which varied between calls on the same contents (measured: three distinct orderings across 200 runs of one registration sequence). No documented behaviour changes, since no order was ever guaranteed, but callers that displayed, diffed, or asserted on the result were nondeterministic.
-- `cue.Context.Encode` is now **lazy**: the input map is converted into a `cue.Value` only when a field actually needs one. Schemas whose fields are all served by the Go-native fast path validate with **zero allocations** (`Validate` on five scalar fields: 2.94µs / 59 allocs → 382ns / 0 allocs). The encode still runs for `@blob()` rules on present fields, nested structs, arrays, constraints too complex for a descriptor, and `uint*` values on `int` constraints. Verdicts are unchanged and pinned by the differential CUE oracle tests.
+- `cue.Context.Encode` is now **lazy**: the input map is converted into a `cue.Value` only when a field actually needs one. Schemas whose fields are all served by the Go-native fast path validate with **zero allocations** (`Validate` on five scalar fields: 2.94µs / 59 allocs → 382ns / 0 allocs). The encode still runs for `@blob()` rules on present fields, nested structs, lists of struct elements, constraints too complex for a descriptor, and `uint*` values on `int` constraints. Verdicts are unchanged and pinned by the differential CUE oracle tests.
 - `FailPriority` now collects CUE and Blob errors from the first failing priority group and skips all higher groups.
 - `@meta(priority=N)` accepts negative values and uses overflow-safe ordering.
 - Present optional fields and present `@blob()` fields receive full CUE validation before Blob execution.
