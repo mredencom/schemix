@@ -195,11 +195,15 @@ r.Output["fee"]        // 150
 
 | 方法 | 用法 | 说明 |
 |------|------|------|
-| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | 字符串/数组/Map 长度 |
-| `min_len(n)` | `this.s.min_len(n: 3)` | 最小长度 |
-| `max_len(n)` | `this.s.max_len(n: 100)` | 最大长度 |
+| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | 字符串的**字节**长度；数组/Map 的元素个数 |
+| `min_len(n)` | `this.s.min_len(n: 3)` | 最小值，单位同 `len_between` |
+| `max_len(n)` | `this.s.max_len(n: 100)` | 最大值，单位同 `len_between` |
 | `str_len(min,max)` | `this.s.str_len(min:2, max:10)` | 字符数（rune）范围 |
 | `between(min,max)` | `this.age.between(min:0, max:150)` | 数值范围（闭区间） |
+
+> **面向用户的长度限制请用 `str_len`。** 三个 `*_len` 方法对字符串数的是字节，
+> 所以 `password.len_between(min: 8, max: 64)` 会放过三个汉字 —— 九个字节。
+> `str_len` 数的是 rune。
 
 ### 金融
 
@@ -227,33 +231,80 @@ r.Output["fee"]        // 150
 
 ```go
 var userSchema = schemix.MustNew(`{
+    // CUE 能表达的就交给 CUE：这些字段留在 Go 原生快速路径上，
+    // 违反时能给出精确的错误码和被突破的边界。
     username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
-    email:    string @blob(this.email.is_email())
-    password: string @blob(this.password.len_between(min: 8, max: 64))
-    age:      int    @blob(this.age.between(min: 13, max: 150))
+    age:      int & >=13 & <=150
     role:     "admin" | "user" | "guest"
-}`, schemix.WithErrorFormatter(apiFormatter))
+
+    // 规则只用于 CUE 表达不了的部分。str_len 按 rune 计数；
+    // len_between 按字节计数，会让三个汉字冒充八位长度通过。
+    email:    string @blob(this.email.is_email())
+    password: string @blob(this.password.str_len(min: 8, max: 64))
+}`)
 
 func CreateUser(w http.ResponseWriter, req *http.Request) {
-    var body map[string]any
-    json.NewDecoder(req.Body).Decode(&body)
+    raw, err := io.ReadAll(req.Body)
+    if err != nil {
+        respond(w, http.StatusBadRequest, map[string]any{"error": "unreadable_body"})
+        return
+    }
 
-    r := userSchema.ProcessWithMode(body, schemix.FailAll)
+    // 把原始字节交给 ProcessValue，JSON 数字才能作为整数抵达 `int` 字段。
+    // 先 decode 成 map[string]any 会让所有数字变成 float64，而 CUE 的 `int`
+    // 不接受 float —— 见下方说明。
+    r := userSchema.ProcessValue(raw) // FailAll：收集全部错误
     if !r.Valid {
-        status := http.StatusBadRequest
-        if r.HasCode(schemix.CodeRequiredMissing) {
-            status = http.StatusUnprocessableEntity
+        // 完全不是 JSON 的请求体在转换层就失败了。这与「某个字段违反规则」
+        // 是两类不同的问题，应该给 400。
+        if r.HasCode(schemix.CodeConfigError) {
+            respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
+            return
         }
-        w.WriteHeader(status)
-        json.NewEncoder(w).Encode(map[string]any{
+
+        details := make([]map[string]string, len(r.Errors))
+        for i, e := range r.Errors {
+            details[i] = map[string]string{
+                "field": e.Path,
+                "code":  string(e.Code),
+                // FriendlyMessage() 是面向用户的措辞；e.Message 是 CUE/Bloblang
+                // 的原始诊断 —— 写进日志，不要返回给调用方。
+                "message": e.FriendlyMessage(),
+            }
+        }
+        respond(w, http.StatusUnprocessableEntity, map[string]any{
             "error":   "validation_failed",
-            "details": r.Errors,
+            "details": details,
         })
         return
     }
-    // 使用 r.Output ...
+
+    respond(w, http.StatusCreated, saveUser(r.Output)) // 计算字段已包含在内
+}
+
+// respond 输出 JSON。Content-Type 必须在 WriteHeader **之前**设置，
+// 之后设置的 header 会被静默丢弃。
+func respond(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
 }
 ```
+
+无法解析的请求体是 `400`；格式正确但内容不符合 schema 是 `422`。
+`HasCode` 用来区分这两者。
+
+> **传给 `ProcessValue` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
+> 会把所有 JSON 数字变成 `float64`，而 CUE 中 `int` 与 `float` 是平行类型，
+> 所以 `age: int & >=13 & <=150` 会以 `E1T01` 拒绝 decode 出来的 `28`。
+> `ProcessValue` 会在数值允许的前提下把 JSON 数字转成整数。
+> （`json.Decoder.UseNumber()` 也没用 —— `json.Number` 本质是字符串。）
+
+> **CUE 能表达的约束不要写成 `@blob`。** `age: int & >=13 & <=150` 失败时给出
+> `E1R01` 和 `age must be <=150`；同样的边界写成
+> `@blob(this.age.between(min: 13, max: 150))` 失败时给出 `E2B01` 和
+> `age does not satisfy a validation rule` —— 调用方完全不知道该怎么改，
+> 而且该字段还丢掉了快速路径描述符。
 
 ## Schema 语法
 

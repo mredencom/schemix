@@ -196,11 +196,15 @@ All methods are available automatically in `@blob()` expressions — no registra
 
 | Method | Usage | Description |
 |--------|-------|-------------|
-| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | String/slice/map length |
-| `min_len(n)` | `this.s.min_len(n: 3)` | Minimum length |
-| `max_len(n)` | `this.s.max_len(n: 100)` | Maximum length |
+| `len_between(min,max)` | `this.s.len_between(min:3, max:20)` | Byte length of a string; element count of a slice/map |
+| `min_len(n)` | `this.s.min_len(n: 3)` | Minimum, same units as `len_between` |
+| `max_len(n)` | `this.s.max_len(n: 100)` | Maximum, same units as `len_between` |
 | `str_len(min,max)` | `this.s.str_len(min:2, max:10)` | Rune count range |
 | `between(min,max)` | `this.age.between(min:0, max:150)` | Numeric range (inclusive) |
+
+> **For a user-facing length limit, reach for `str_len`.** The three `*_len`
+> methods count bytes on a string, so `password.len_between(min: 8, max: 64)`
+> accepts three CJK characters — nine bytes. `str_len` counts runes.
 
 ### Financial
 
@@ -228,33 +232,80 @@ Pre-compile at startup, validate per request with zero compilation overhead:
 
 ```go
 var userSchema = schemix.MustNew(`{
+    // Anything CUE can express belongs in CUE: these stay on the Go-native
+    // fast path, and a violation carries a precise code and the bound it broke.
     username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
-    email:    string @blob(this.email.is_email())
-    password: string @blob(this.password.len_between(min: 8, max: 64))
-    age:      int    @blob(this.age.between(min: 13, max: 150))
+    age:      int & >=13 & <=150
     role:     "admin" | "user" | "guest"
-}`, schemix.WithErrorFormatter(apiFormatter))
+
+    // A rule is for what CUE cannot express. str_len counts runes; len_between
+    // counts bytes, which would let three CJK characters pass as eight.
+    email:    string @blob(this.email.is_email())
+    password: string @blob(this.password.str_len(min: 8, max: 64))
+}`)
 
 func CreateUser(w http.ResponseWriter, req *http.Request) {
-    var body map[string]any
-    json.NewDecoder(req.Body).Decode(&body)
+    raw, err := io.ReadAll(req.Body)
+    if err != nil {
+        respond(w, http.StatusBadRequest, map[string]any{"error": "unreadable_body"})
+        return
+    }
 
-    r := userSchema.ProcessWithMode(body, schemix.FailAll)
+    // Hand ProcessValue the raw bytes so a JSON number reaches an `int` field as
+    // an integer. Decoding into map[string]any first makes every number a
+    // float64, and CUE's `int` rejects a float — see the note below.
+    r := userSchema.ProcessValue(raw) // FailAll: collects every error
     if !r.Valid {
-        status := http.StatusBadRequest
-        if r.HasCode(schemix.CodeRequiredMissing) {
-            status = http.StatusUnprocessableEntity
+        // A body that is not JSON at all fails at the conversion layer. That is
+        // a different problem from a field that broke a rule, and deserves 400.
+        if r.HasCode(schemix.CodeConfigError) {
+            respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
+            return
         }
-        w.WriteHeader(status)
-        json.NewEncoder(w).Encode(map[string]any{
+
+        details := make([]map[string]string, len(r.Errors))
+        for i, e := range r.Errors {
+            details[i] = map[string]string{
+                "field": e.Path,
+                "code":  string(e.Code),
+                // FriendlyMessage() is the user-facing sentence. e.Message holds
+                // raw CUE/Bloblang wording — log it, don't return it.
+                "message": e.FriendlyMessage(),
+            }
+        }
+        respond(w, http.StatusUnprocessableEntity, map[string]any{
             "error":   "validation_failed",
-            "details": r.Errors,
+            "details": details,
         })
         return
     }
-    // use r.Output ...
+
+    respond(w, http.StatusCreated, saveUser(r.Output)) // computed fields included
+}
+
+// respond writes JSON. Content-Type must be set *before* WriteHeader; a header
+// set afterwards is silently discarded.
+func respond(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
 }
 ```
+
+A body that could not be parsed is a `400`; a well-formed body whose contents
+break the schema is a `422`. `HasCode` separates the two.
+
+> **Give `ProcessValue` the bytes, not a decoded map.** `json.Unmarshal` turns
+> every JSON number into a `float64`, and CUE keeps `int` and `float` as sibling
+> types, so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`.
+> `ProcessValue` converts JSON numbers to integers where the value allows it.
+> (`json.Decoder.UseNumber()` does not help — a `json.Number` is a string.)
+
+> **Prefer CUE over `@blob` for anything CUE can state.** `age: int & >=13 & <=150`
+> fails with `E1R01` and `age must be <=150`; the same bound written as
+> `@blob(this.age.between(min: 13, max: 150))` fails with `E2B01` and
+> `age does not satisfy a validation rule`, which tells the caller nothing about
+> how to fix it, and the field loses its fast-path descriptor.
 
 ## Schema Syntax
 
