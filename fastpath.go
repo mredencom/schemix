@@ -92,6 +92,14 @@ func extractFastConstraint(schema cue.Value) *fastConstraint {
 	// Eval() resolves definition references (e.g. #PAN → =~"^[0-9]{16}$")
 	raw := schema
 	schema = schema.Eval()
+
+	// Eval() also collapses a disjunction to its default branch, which hides the
+	// alternatives from every extractor below: `*10 | int & >=0` arrives looking
+	// like a bare `int`, with the >=0 sitting on a branch no longer visible.
+	if hasHiddenDisjunctionBranches(schema, raw) {
+		return nil
+	}
+
 	kind := schema.IncompleteKind()
 
 	switch kind {
@@ -115,6 +123,46 @@ func extractFastConstraint(schema cue.Value) *fastConstraint {
 		// struct or complex — no fast path
 		return nil
 	}
+}
+
+// hasHiddenDisjunctionBranches reports whether Eval() collapsed a disjunction of
+// non-concrete types down to its first branch, which would leave the extractors
+// reasoning about one alternative as though it were the whole constraint:
+// `[...string] | [...int]` arrives looking exactly like `[...string]`, so a list
+// of ints would be rejected against a schema that accepts it.
+//
+// A disjunction of concrete literals survives — `"CNY" | "USD"` keeps its OrOp —
+// which is what enum extraction reads, so those still take the fast path.
+//
+// The other way CUE hides a branch, a folded default marker, reports no OrOp at
+// all and is caught by noOpWrapsConstraint instead.
+func hasHiddenDisjunctionBranches(evaluated, raw cue.Value) bool {
+	if rawOp, _ := raw.Expr(); rawOp != cue.OrOp {
+		return false
+	}
+	evalOp, _ := evaluated.Expr()
+	return evalOp != cue.OrOp
+}
+
+// noOpWrapsConstraint reports whether a NoOp expression is only a wrapper around
+// a constraint one level down.
+//
+// A default marker folds its disjunction away entirely: `*10 | int & >=0` reports
+// NoOp at the top with `int & >=0` as its single operand, and `*"hi" | =~"^a"`
+// reports NoOp wrapping the regex. Reading only the top level would take either
+// for a bare type and drop the constraint.
+//
+// An unadorned type or open list wraps nothing — `string`, `int`, `[...string]`
+// and `[...int & >0]` all report NoOp inside NoOp — so they are unaffected.
+// cue.Value.Default() cannot be used to make this distinction: an open list
+// defaults to the empty list and so reports a default of its own.
+func noOpWrapsConstraint(v cue.Value) bool {
+	op, vals := v.Expr()
+	if op != cue.NoOp || len(vals) != 1 {
+		return false
+	}
+	innerOp, _ := vals[0].Expr()
+	return innerOp != cue.NoOp
 }
 
 // extractListConstraint handles an open list whose verdict reduces to checking
@@ -173,14 +221,19 @@ func extractListConstraint(evaluated, raw cue.Value) *fastConstraint {
 // isBareType reports whether v is an unadorned type declaration such as
 // `string` or `int`, carrying neither a concrete value nor any conjunct.
 //
-// Both halves matter. A non-NoOp expression means conjuncts the caller has not
+// Three things matter. A non-NoOp expression means conjuncts the caller has not
 // accounted for; a concrete value means equality, which no descriptor kind
-// expresses. Either way the field belongs on the CUE path.
+// expresses; and a NoOp may still wrap a constraint one level down, which is how
+// CUE represents a folded default marker. Any of them puts the field on the CUE
+// path.
 func isBareType(v cue.Value) bool {
 	if op, _ := v.Expr(); op != cue.NoOp {
 		return false
 	}
-	return !v.IsConcrete()
+	if v.IsConcrete() {
+		return false
+	}
+	return !noOpWrapsConstraint(v)
 }
 
 // extractStringConstraint handles string fields: pure string, regex, or enum.
@@ -221,6 +274,11 @@ func scanStringConjuncts(v cue.Value) (re *regexp.Regexp, exhaustive bool) {
 	case cue.NoOp:
 		if v.IsConcrete() {
 			// A concrete `"hello"` constrains by equality, not by type.
+			return nil, false
+		}
+		if noOpWrapsConstraint(v) {
+			// A folded default marker: `*"hi" | =~"^[a-z]+$"` reports NoOp with
+			// the regex hidden one level down.
 			return nil, false
 		}
 		return nil, true
@@ -665,17 +723,32 @@ func validateFastIntType(val any) fastResult {
 }
 
 // validateFastFloatType validates float type with NaN/Inf rejection.
+//
+// An integer value does not satisfy `float`. CUE keeps int and float as sibling
+// subtypes of number, so `r: float` rejects 50 and accepts 50.0; a field meant to
+// take either must be declared `number`.
 func validateFastFloatType(val any) fastResult {
 	switch v := val.(type) {
 	case float64:
 		return validateFiniteFloat(v, val, "float")
 	case float32:
 		return validateFiniteFloat(float64(v), val, "float")
-	case int, int8, int16, int32, int64:
-		return pass() // int is valid for float
 	default:
 		return fail(CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val))
 	}
+}
+
+// rejectIntOnFloat guards the shared numeric paths, which serve both `float` and
+// `number` descriptors, against accepting an integer where CUE would not.
+func rejectIntOnFloat(fc *fastConstraint, val any) (fastResult, bool) {
+	if !fc.expectFloat {
+		return fastResult{}, false
+	}
+	switch val.(type) {
+	case int, int8, int16, int32, int64:
+		return fail(CodeTypeMismatch, fmt.Sprintf("expected float, got %T", val)), true
+	}
+	return fastResult{}, false
 }
 
 // validateFastNumberType validates number (int or float) with NaN/Inf rejection.
@@ -726,6 +799,10 @@ func validateFastRange(fc *fastConstraint, val any) fastResult {
 			// Unsigned integers and unknown numeric representations fall back to CUE.
 			return fallbackToCUE()
 		}
+	}
+
+	if fr, rejected := rejectIntOnFloat(fc, val); rejected {
+		return fr
 	}
 
 	n, ok := toFloat64(val)
@@ -862,6 +939,9 @@ func validateFastEnum(fc *fastConstraint, val any) fastResult {
 	}
 
 	if fc.floatEnums != nil {
+		if fr, rejected := rejectIntOnFloat(fc, val); rejected {
+			return fr
+		}
 		n, ok := toFloat64(val)
 		if !ok {
 			return fail(CodeTypeMismatch, fmt.Sprintf("expected number, got %T", val))

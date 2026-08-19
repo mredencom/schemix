@@ -175,6 +175,35 @@ func TestOracle_FastPathVsCUE(t *testing.T) {
 		{"list-disjunction/string-branch", `{ tags: [...string] | [...int] }`, map[string]any{"tags": []any{"a"}}},
 		{"list-struct-element/valid", `{ items: [...{qty: int}] }`, map[string]any{"items": []any{map[string]any{"qty": int64(1)}}}},
 		{"list-nested-list", `{ m: [...[...string]] }`, map[string]any{"m": []any{[]any{"a"}}}},
+
+		// ── int is not a float ───────────────────────────────────────────────
+		// CUE keeps int and float as sibling subtypes of number: `float` rejects
+		// an integer value, while `number` accepts either.
+		{"float-bare/int-value", `{ r: float }`, map[string]any{"r": int64(50)}},
+		{"float-bare/float-value", `{ r: float }`, map[string]any{"r": 50.0}},
+		{"float-range/int-value", `{ r: float & >=0.0 & <=100.0 }`, map[string]any{"r": int64(50)}},
+		{"float-range/float-value", `{ r: float & >=0.0 & <=100.0 }`, map[string]any{"r": 50.5}},
+		{"float-enum/int-value", `{ r: 0.5 | 1.0 | 2.0 }`, map[string]any{"r": int64(2)}},
+		{"float-list/int-value", `{ r: [...float] }`, map[string]any{"r": []any{int64(1)}}},
+		{"float-list/float-value", `{ r: [...float] }`, map[string]any{"r": []any{1.5, 2.5}}},
+		{"float-range-list/int-value", `{ r: [...float & >0.0] }`, map[string]any{"r": []any{int64(1)}}},
+		{"number-bare/int-value", `{ n: number }`, map[string]any{"n": int64(50)}},
+		{"number-range/int-value", `{ n: number & >=0 }`, map[string]any{"n": int64(50)}},
+		{"number-list/int-value", `{ n: [...number] }`, map[string]any{"n": []any{int64(1), 2.5}}},
+
+		// ── Default markers ─────────────────────────────────────────────────
+		// `*d | T` is a disjunction. Eval() collapses it to the default branch,
+		// hiding the alternatives from every extractor, so the constraints on
+		// those branches would be dropped.
+		{"default-int-range/violated", `{ n: *10 | int & >=0 }`, map[string]any{"n": int64(-1)}},
+		{"default-int-range/satisfied", `{ n: *10 | int & >=0 }`, map[string]any{"n": int64(7)}},
+		{"default-int-two-bounds/violated", `{ n: *50 | int & >0 & <100 }`, map[string]any{"n": int64(0)}},
+		{"default-string-regex/violated", `{ s: *"hello" | =~"^[a-z]+$" }`, map[string]any{"s": "123"}},
+		{"default-string-regex/satisfied", `{ s: *"hello" | =~"^[a-z]+$" }`, map[string]any{"s": "abc"}},
+		{"default-plain-int/negative", `{ n: *10 | int }`, map[string]any{"n": int64(-1)}},
+		{"default-enum/violated", `{ c: *"USD" | "CNY" | "EUR" }`, map[string]any{"c": "XXX"}},
+		{"default-enum/satisfied", `{ c: *"USD" | "CNY" | "EUR" }`, map[string]any{"c": "CNY"}},
+		{"default-list/violated", `{ tags: *["a"] | [...string] }`, map[string]any{"tags": []any{int64(1)}}},
 	}
 
 	fastOnlyGuards := map[string]bool{
