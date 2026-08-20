@@ -1,0 +1,456 @@
+package schemix
+
+import (
+	"strconv"
+	"strings"
+)
+
+// Localizer renders a validation error as text for a person to read.
+//
+// The built-in *Catalog covers the common case — a table of message templates
+// per language — but the interface exists because translation infrastructure is
+// usually already in place. A team with an ICU or gettext pipeline, or with
+// plural rules a template language cannot express, implements this instead of
+// moving their translations into a Go map.
+//
+// Implementations must honour three rules:
+//
+//   - Never return an empty string. Callers render the result unconditionally,
+//     so an empty return shows up as a field error with no explanation.
+//   - Do not include the offending value. The value may be a password or a card
+//     number, and a message ends up in API responses and logs.
+//   - Stay pure. The same error must render the same way every time, and the
+//     same error must be renderable in two languages at once.
+type Localizer interface {
+	Localize(e ValidationError) string
+}
+
+// Message is one entry in a Catalog: a template, plus the wording to use when
+// the template names something the error does not carry.
+//
+// The pair exists because a template is not always renderable. "{field} must be
+// {bound}" has nothing to say about a value rejected as ±Inf, where no declared
+// bound was broken — rendering it anyway would produce "amount must be", a
+// sentence that trails off. Fallback is the same statement without the missing
+// part.
+type Message struct {
+	// Template is used when every placeholder it names has a value.
+	Template string
+
+	// Fallback is used when any placeholder in Template has no value. It should
+	// name fewer placeholders — usually only {field} — or none at all.
+	Fallback string
+}
+
+// Catalog is the built-in Localizer: a lookup table from error code to wording.
+//
+// A catalog need not be complete. Fallback chains to another Localizer for
+// anything this one does not define, which is what makes overriding a single
+// message practical:
+//
+//	var myCatalog = &schemix.Catalog{
+//	    Messages: map[schemix.ErrorCode]schemix.Message{
+//	        schemix.CodeRequiredMissing: {Template: "please fill in {field}"},
+//	    },
+//	    Fallback: schemix.EnUS,
+//	}
+//
+// Copying the whole table instead would go stale: a reworded built-in message
+// would never reach the copy, and the drift is silent.
+//
+// A Catalog is read-only once built. Sharing one across goroutines is safe;
+// mutating its maps after a validator is serving traffic is not.
+type Catalog struct {
+	// Messages maps an error code to its wording. Codes absent here fall through
+	// to Default, then to Fallback.
+	Messages map[ErrorCode]Message
+
+	// Default renders codes Messages does not cover, including codes added by a
+	// future version of this package. Leaving it empty is safe but means an
+	// unrecognised code falls through to Fallback.
+	Default Message
+
+	// Labels renames field paths for display: a schema calls it "user_email",
+	// a form calls it "Email address".
+	//
+	// Keys are matched against the error path first, then against the path with
+	// array indices stripped, so "items[].price" labels every element. The empty
+	// key labels errors that carry no path at all.
+	Labels map[string]string
+
+	// SuggestionSuffix is appended when the error carries a Suggestion. It is a
+	// template like the others and may use {suggestion}, which renders quoted.
+	// An empty value inherits the suffix from Fallback, so a catalog overriding
+	// one message does not silently drop the suggestion from it.
+	SuggestionSuffix string
+
+	// Fallback handles what this catalog does not define. Nil ends the chain.
+	Fallback Localizer
+}
+
+// Compile-time proof that the built-in implementation satisfies the interface it
+// is the default for.
+var _ Localizer = (*Catalog)(nil)
+
+// genericFailureMessage is the last resort when a chain defines nothing usable.
+// It says as little as possible while still being a sentence, because the
+// alternative — an empty string — renders as a blank error in a UI.
+const genericFailureMessage = "validation failed"
+
+// maxFallbackDepth bounds chain traversal. A cycle is easy to build by accident
+// when catalogs are assembled at startup, and a library must not spin on one.
+const maxFallbackDepth = 8
+
+// Localize implements Localizer.
+func (c *Catalog) Localize(e ValidationError) string {
+	return c.localize(e, 0)
+}
+
+func (c *Catalog) localize(e ValidationError, depth int) string {
+	if c == nil || depth >= maxFallbackDepth {
+		return genericFailureMessage
+	}
+
+	// Resolve the label at every level rather than once at the entry point: the
+	// wording may come from a fallback catalog while the label comes from this
+	// one. e is a copy, so the caller's error is untouched.
+	if label, ok := c.lookupLabel(e.Path); ok {
+		e.Path = label
+	}
+
+	if s := c.render(e, depth); s != "" {
+		return s
+	}
+
+	switch next := c.Fallback.(type) {
+	case nil:
+		return genericFailureMessage
+	case *Catalog:
+		return next.localize(e, depth+1)
+	default:
+		// A third-party implementation owns its own chain; call it once and
+		// trust it, but still guarantee a non-empty result.
+		if s := next.Localize(e); s != "" {
+			return s
+		}
+		return genericFailureMessage
+	}
+}
+
+// render produces this catalog's own wording, or "" to defer to the chain.
+func (c *Catalog) render(e ValidationError, depth int) string {
+	msg, ok := c.Messages[e.Code]
+	if !ok {
+		msg = c.Default
+	}
+
+	body := c.expand(msg.Template, e)
+	if body == "" {
+		body = c.expand(msg.Fallback, e)
+	}
+	if body == "" {
+		return ""
+	}
+
+	if e.Suggestion != "" {
+		if suffix := c.expand(c.suggestionSuffix(depth), e); suffix != "" {
+			body += suffix
+		}
+	}
+	return body
+}
+
+// suggestionSuffix walks the chain so that a catalog overriding a single message
+// keeps the suffix rather than dropping it by omission.
+func (c *Catalog) suggestionSuffix(depth int) string {
+	if c.SuggestionSuffix != "" {
+		return c.SuggestionSuffix
+	}
+	if next, ok := c.Fallback.(*Catalog); ok && depth < maxFallbackDepth {
+		return next.suggestionSuffix(depth + 1)
+	}
+	return ""
+}
+
+// expand substitutes {placeholder} references, returning "" if any of them has
+// no value — that is the signal for the caller to try Message.Fallback rather
+// than emit a sentence with a hole in it.
+func (c *Catalog) expand(tmpl string, e ValidationError) string {
+	if tmpl == "" {
+		return ""
+	}
+	if !strings.ContainsRune(tmpl, '{') {
+		return tmpl
+	}
+
+	var b strings.Builder
+	b.Grow(len(tmpl) + 16)
+	rest := tmpl
+	for {
+		open := strings.IndexByte(rest, '{')
+		if open < 0 {
+			b.WriteString(rest)
+			break
+		}
+		close := strings.IndexByte(rest[open:], '}')
+		if close < 0 {
+			// Unbalanced brace: emit it literally rather than discarding the
+			// message over a typo.
+			b.WriteString(rest)
+			break
+		}
+		close += open
+
+		b.WriteString(rest[:open])
+		value, ok := placeholderValue(rest[open+1:close], e)
+		if !ok {
+			return ""
+		}
+		b.WriteString(value)
+		rest = rest[close+1:]
+	}
+	return b.String()
+}
+
+// placeholderValue resolves one placeholder. Reporting false means the template
+// cannot be rendered, which includes an unknown placeholder name: a catalog
+// naming {feild} should fall back to sound wording rather than print the typo.
+//
+// There is deliberately no {value} placeholder. The rejected value may be a
+// password or a card number, and these messages are returned to API clients and
+// written to logs.
+func placeholderValue(name string, e ValidationError) (string, bool) {
+	switch name {
+	case "field":
+		return e.Path, e.Path != ""
+	case "type":
+		return e.FieldType, e.FieldType != ""
+	case "bound":
+		return e.Bound, e.Bound != ""
+	case "options":
+		opts := enumOptionsText(e)
+		return opts, opts != ""
+	case "suggestion":
+		return strconv.Quote(e.Suggestion), e.Suggestion != ""
+	}
+	return "", false
+}
+
+// lookupLabel resolves a display name for a path, trying the path as given and
+// then with array indices collapsed.
+func (c *Catalog) lookupLabel(path string) (string, bool) {
+	if len(c.Labels) == 0 {
+		return "", false
+	}
+	if label, ok := c.Labels[path]; ok {
+		return label, true
+	}
+	if normalized := NormalizePath(path); normalized != path {
+		label, ok := c.Labels[normalized]
+		return label, ok
+	}
+	return "", false
+}
+
+// enumOptionsText renders the accepted values as they appear in a message:
+// string candidates quoted, numeric ones bare, matching the raw diagnostic.
+//
+// It falls back to parsing the detail text for errors that predate the
+// structured field or were built by hand elsewhere.
+func enumOptionsText(e ValidationError) string {
+	if len(e.EnumOptions) == 0 {
+		return enumOptionsFromDetail(e.Message)
+	}
+
+	quoted := !isNumericFieldType(e.FieldType)
+	// Sized up front and appended into, the way stringEnumDetail does it:
+	// strconv.Quote per candidate would allocate an intermediate string each
+	// time, and this runs once per rejected field of a form.
+	size := 2 + 2*len(e.EnumOptions)
+	for _, opt := range e.EnumOptions {
+		size += len(opt) + 2
+	}
+	buf := make([]byte, 0, size)
+	buf = append(buf, '[')
+	for i, opt := range e.EnumOptions {
+		if i > 0 {
+			buf = append(buf, ", "...)
+		}
+		if quoted {
+			buf = strconv.AppendQuote(buf, opt)
+		} else {
+			buf = append(buf, opt...)
+		}
+	}
+	buf = append(buf, ']')
+	return string(buf)
+}
+
+func isNumericFieldType(t string) bool {
+	switch t {
+	case "int", "float", "number":
+		return true
+	}
+	return false
+}
+
+// NormalizePath collapses array indices so that one label covers every element:
+// "items[0].price" and "items[7].price" both become "items[].price".
+//
+// It is exported because any Localizer implementation needs it to look labels up
+// the same way Catalog does; keeping it private would force every implementation
+// to reimplement it.
+func NormalizePath(path string) string {
+	if !strings.ContainsRune(path, '[') {
+		return path
+	}
+
+	var b strings.Builder
+	b.Grow(len(path))
+	rest := path
+	for {
+		open := strings.IndexByte(rest, '[')
+		if open < 0 {
+			b.WriteString(rest)
+			break
+		}
+		close := strings.IndexByte(rest[open:], ']')
+		if close < 0 {
+			b.WriteString(rest)
+			break
+		}
+		close += open
+
+		b.WriteString(rest[:open])
+		if isAllDigits(rest[open+1 : close]) {
+			b.WriteString("[]")
+		} else {
+			// Not an index. Leave it alone rather than guess what it means.
+			b.WriteString(rest[open : close+1])
+		}
+		rest = rest[close+1:]
+	}
+	return b.String()
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// EnUS is the built-in English catalog, and the wording every other catalog
+// falls back to.
+//
+// It is also what FriendlyMessage renders, so its templates must keep producing
+// exactly the sentences that method has always returned —
+// TestEnUSMatchesFriendlyMessage holds that line.
+var EnUS = &Catalog{
+	Messages: map[ErrorCode]Message{
+		CodeRequiredMissing: {Template: "{field} is required"},
+		CodeCondRequired:    {Template: "{field} is required for this request"},
+		CodeTypeMismatch: {
+			Template: "{field} must be of type {type}",
+			Fallback: "{field} has the wrong type",
+		},
+		CodeEnumInvalid: {
+			Template: "{field} must be one of {options}",
+			Fallback: "{field} is not one of the allowed values",
+		},
+		CodeRangeViolation: {
+			Template: "{field} must be {bound}",
+			Fallback: "{field} is out of the allowed range",
+		},
+		CodeFormatMismatch:   {Template: "{field} has an invalid format"},
+		CodeArrayElement:     {Template: "{field} contains an invalid item"},
+		CodeBizRuleFailed:    {Template: "{field} does not satisfy a validation rule"},
+		CodeBlobTypeMismatch: {Template: "{field} produced a value of the wrong type"},
+		CodeExprExecError:    {Template: "{field} could not be evaluated"},
+		CodeMetaRuntimeError: {Template: "{field} could not be evaluated"},
+		CodeCUEOther:         {Template: "{field} is invalid"},
+		// A configuration error is not about a field, so it names none.
+		CodeConfigError: {Template: "the validation configuration is invalid"},
+	},
+	// Covers codes this version does not know, including any added later.
+	Default: Message{Template: "{field} is invalid"},
+	Labels: map[string]string{
+		// Errors that carry no path still need a subject.
+		"": "value",
+	},
+	SuggestionSuffix: " — did you mean {suggestion}?",
+}
+
+// FriendlyMessage renders a user-facing sentence for the error.
+//
+// Message and FriendlyMessage are both always available, which is deliberate:
+// a service typically logs the raw diagnostic and renders the friendly one, and
+// needing both at once is the common case rather than a mode to switch between.
+//
+//	log.Warn(e.Message)              // raw CUE/Bloblang wording
+//	json.Encode(e.FriendlyMessage()) // user-facing text
+//
+// The text is always English. It is EnUS.Localize(e), and there is no way to
+// change that through this method — an error carries no locale, and adding one
+// would put a translation decision inside a serialised DTO. For any other
+// language, render the error with a Localizer instead:
+//
+//	msg := myCatalog.Localize(e)          // one error
+//	msgs := result.LocalizedMessages()    // whole result
+//
+// A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
+// from the structured fields (Code, Path, FieldType, EnumOptions, Bound,
+// Suggestion) and therefore stays stable regardless of formatter configuration.
+func (e ValidationError) FriendlyMessage() string {
+	return EnUS.Localize(e)
+}
+
+// enumOptionsFromDetail lifts the candidate list out of an enum detail such as
+// `value "USE" not in enum ["CNY", "USD"]`, returning `["CNY", "USD"]`.
+//
+// This is a fallback for errors whose EnumOptions field is empty. It reads text
+// that is not part of any contract, which is exactly why the structured field
+// exists — but an error built by hand, or one produced before that field was
+// filled, still has to render.
+func enumOptionsFromDetail(detail string) string {
+	open := strings.LastIndex(detail, "[")
+	if open < 0 || !strings.HasSuffix(detail, "]") {
+		return ""
+	}
+	return detail[open:]
+}
+
+// boundFromDetail lifts the comparison out of a range detail such as
+// `value 999 out of bound <=150`, returning `<=150`.
+//
+// Unlike the enum equivalent this is the primary source for Bound rather than a
+// fallback: a descriptor holding both a minimum and a maximum cannot say which
+// one a value broke without comparing again, while the detail text — generated
+// by this package, not by CUE — already names the side that failed.
+func boundFromDetail(detail string) string {
+	const marker = "out of bound "
+	i := strings.Index(detail, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(detail[i+len(marker):])
+}
+
+// ErrorFormatter customizes the raw diagnostic in ValidationError.Message.
+//
+// It replaces Message, which is the text meant for logs. For user-facing
+// wording — including translations — use a Localizer instead: it receives the
+// whole error rather than three strings, and it does not overwrite the
+// diagnostic a developer needs when debugging.
+//
+// Example:
+//
+//	func myFormatter(code ErrorCode, path, detail string) string {
+//	    return fmt.Sprintf("%s[%s]: %s", path, code, detail)
+//	}
+type ErrorFormatter func(code ErrorCode, path string, detail string) string

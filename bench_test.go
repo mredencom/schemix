@@ -357,3 +357,60 @@ func BenchmarkValidate_NoDeepCopy_Nested(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkLocalize measures message rendering, which is now a public API rather
+// than an implementation detail of FriendlyMessage: LocalizedMessages calls it
+// once per error, so a form with twenty rejected fields pays it twenty times.
+//
+// It is off the validation hot path — nothing here runs unless a caller asks for
+// text — but a baseline is needed before the catalog grows plural rules or
+// per-locale labels.
+func BenchmarkLocalize(b *testing.B) {
+	cases := []struct {
+		name string
+		err  ValidationError
+	}{
+		{
+			// No placeholder lookups beyond the field name.
+			name: "simple template",
+			err:  ValidationError{Code: CodeRequiredMissing, Path: "age"},
+		},
+		{
+			// The most expensive shape: candidate list plus a suggestion suffix.
+			name: "enum with suggestion",
+			err: ValidationError{
+				Code: CodeEnumInvalid, Path: "currency",
+				EnumOptions: []string{"CNY", "USD", "EUR"},
+				Suggestion:  "USD",
+			},
+		},
+		{
+			// Template rejected for a missing value, so Fallback renders instead.
+			name: "template falls back",
+			err:  ValidationError{Code: CodeRangeViolation, Path: "age"},
+		},
+		{
+			// Two catalogs deep, with a label to resolve on the way.
+			name: "chained catalog with label",
+			err:  ValidationError{Code: CodeFormatMismatch, Path: "items[3].pan"},
+		},
+	}
+
+	labelled := &Catalog{
+		Labels:   map[string]string{"items[].pan": "Card number"},
+		Fallback: EnUS,
+	}
+
+	for _, c := range cases {
+		loc := Localizer(EnUS)
+		if c.name == "chained catalog with label" {
+			loc = labelled
+		}
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = loc.Localize(c.err)
+			}
+		})
+	}
+}
