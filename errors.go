@@ -193,8 +193,6 @@ func boundFromDetail(detail string) string {
 	return strings.TrimSpace(detail[i+len(marker):])
 }
 
-// maxSuggestionDistance caps how far a value may be from a candidate before the
-
 // Result holds the output of a Process call.
 type Result struct {
 	Valid  bool              `json:"valid"`

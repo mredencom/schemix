@@ -265,6 +265,3 @@ func unquoteAll(vals []string) []string {
 	}
 	return out
 }
-
-// suggestClosest returns the candidate nearest to value, or "" when none is
-// close enough to be a confident correction. Comparison is case-insensitive so
