@@ -1,6 +1,9 @@
 package schemix
 
 import (
+	"errors"
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -103,12 +106,19 @@ const maxFallbackDepth = 8
 
 // Localize implements Localizer.
 func (c *Catalog) Localize(e ValidationError) string {
-	return c.localize(e, 0)
+	if s, ok := c.resolve(e, 0); ok {
+		return s
+	}
+	return genericFailureMessage
 }
 
-func (c *Catalog) localize(e ValidationError, depth int) string {
+// resolve walks the fallback chain, reporting whether anything in it produced
+// wording. The boolean is what separates "nobody covers this code" from "the
+// wording happens to read like the generic message", which Validate depends on
+// to tell a gap from a coincidence.
+func (c *Catalog) resolve(e ValidationError, depth int) (string, bool) {
 	if c == nil || depth >= maxFallbackDepth {
-		return genericFailureMessage
+		return "", false
 	}
 
 	// Resolve the label at every level rather than once at the entry point: the
@@ -119,21 +129,21 @@ func (c *Catalog) localize(e ValidationError, depth int) string {
 	}
 
 	if s := c.render(e, depth); s != "" {
-		return s
+		return s, true
 	}
 
 	switch next := c.Fallback.(type) {
 	case nil:
-		return genericFailureMessage
+		return "", false
 	case *Catalog:
-		return next.localize(e, depth+1)
+		return next.resolve(e, depth+1)
 	default:
 		// A third-party implementation owns its own chain; call it once and
 		// trust it, but still guarantee a non-empty result.
 		if s := next.Localize(e); s != "" {
-			return s
+			return s, true
 		}
-		return genericFailureMessage
+		return "", false
 	}
 }
 
@@ -454,3 +464,175 @@ func boundFromDetail(detail string) string {
 //	    return fmt.Sprintf("%s[%s]: %s", path, code, detail)
 //	}
 type ErrorFormatter func(code ErrorCode, path string, detail string) string
+
+// ZhCN is the built-in Simplified Chinese catalog.
+//
+// Latin runs embedded in Chinese text are spaced on both sides, per common
+// Chinese typography — "年龄的类型必须是 int", not "年龄的类型必须是int". Field
+// paths are not spaced, because a path is a schema identifier and reads as one;
+// set Labels to give a field a Chinese name where that matters:
+//
+//	loc := &schemix.Catalog{
+//	    Labels:   map[string]string{"age": "年龄", "items[].price": "单价"},
+//	    Fallback: schemix.ZhCN,
+//	}
+var ZhCN = &Catalog{
+	Messages: map[ErrorCode]Message{
+		CodeRequiredMissing: {Template: "{field}为必填项"},
+		CodeCondRequired:    {Template: "当前请求必须提供{field}"},
+		CodeTypeMismatch: {
+			Template: "{field}的类型必须是 {type}",
+			Fallback: "{field}的类型不正确",
+		},
+		CodeEnumInvalid: {
+			Template: "{field}必须是 {options} 中的一个",
+			Fallback: "{field}不在允许的取值范围内",
+		},
+		CodeRangeViolation: {
+			Template: "{field}必须满足 {bound}",
+			Fallback: "{field}超出允许的范围",
+		},
+		CodeFormatMismatch:   {Template: "{field}的格式不正确"},
+		CodeArrayElement:     {Template: "{field}中包含无效的元素"},
+		CodeBizRuleFailed:    {Template: "{field}未通过校验规则"},
+		CodeBlobTypeMismatch: {Template: "{field}计算出的值类型不正确"},
+		CodeExprExecError:    {Template: "{field}无法完成计算"},
+		CodeMetaRuntimeError: {Template: "{field}无法完成计算"},
+		CodeCUEOther:         {Template: "{field}无效"},
+		CodeConfigError:      {Template: "校验配置无效"},
+	},
+	Default: Message{Template: "{field}无效"},
+	Labels: map[string]string{
+		"": "该值",
+	},
+	SuggestionSuffix: "，您是否想输入 {suggestion}？",
+}
+
+// placeholderNamesInTemplate is the closed set expand recognises. A name outside
+// it makes a template unrenderable, which is a silent degradation at runtime and
+// a reported problem at Validate time.
+var knownPlaceholderNames = map[string]bool{
+	"field": true, "type": true, "bound": true, "options": true, "suggestion": true,
+}
+
+// Validate reports problems that would otherwise show up as degraded wording in
+// production: a code nothing covers, a template naming a placeholder that does
+// not exist, a message with no Fallback for the case its placeholders are empty,
+// or a fallback chain that loops.
+//
+// Nothing calls this automatically. A Localizer stays pure and silent — it has no
+// logger and must not write to stderr from inside a library — so the way to find
+// out that a translation is incomplete is to ask at startup:
+//
+//	func init() {
+//	    if err := myCatalog.Validate(); err != nil {
+//	        log.Fatalf("message catalog: %v", err)
+//	    }
+//	}
+//
+// A catalog with a Fallback is judged on what the whole chain produces, so
+// defining one message and inheriting the rest passes.
+func (c *Catalog) Validate() error {
+	if c == nil {
+		return errors.New("schemix: catalog is nil")
+	}
+
+	// Cycles first: every check below renders through the chain, and the results
+	// are not meaningful while it loops.
+	if err := c.detectFallbackCycle(); err != nil {
+		return err
+	}
+
+	problems := c.checkPlaceholders()
+
+	for _, code := range builtinErrorCodes {
+		// Every placeholder has a value, so Template must be renderable.
+		furnished := ValidationError{
+			Code: code, Path: "field", FieldType: "int",
+			Bound: ">0", EnumOptions: []string{"a"}, Suggestion: "a",
+		}
+		if _, ok := c.resolve(furnished, 0); !ok {
+			problems = append(problems,
+				fmt.Errorf("schemix: no message covers %s", code))
+			continue
+		}
+		// Nothing but the code and the path, which is what an error looks like
+		// when the schema declared no type and broke no bound.
+		bare := ValidationError{Code: code, Path: "field"}
+		if _, ok := c.resolve(bare, 0); !ok {
+			problems = append(problems,
+				fmt.Errorf("schemix: %s renders only when its placeholders have values; "+
+					"add Message.Fallback so an error missing them still reads as a sentence", code))
+		}
+	}
+
+	return errors.Join(problems...)
+}
+
+func (c *Catalog) detectFallbackCycle() error {
+	seen := make(map[*Catalog]bool)
+	for cur := c; cur != nil; {
+		if seen[cur] {
+			return errors.New("schemix: catalog fallback chain contains a cycle")
+		}
+		seen[cur] = true
+		next, ok := cur.Fallback.(*Catalog)
+		if !ok {
+			return nil
+		}
+		cur = next
+	}
+	return nil
+}
+
+func (c *Catalog) checkPlaceholders() []error {
+	var problems []error
+	check := func(where, tmpl string) {
+		for _, name := range placeholderNames(tmpl) {
+			if !knownPlaceholderNames[name] {
+				problems = append(problems,
+					fmt.Errorf("schemix: %s uses unknown placeholder {%s}", where, name))
+			}
+		}
+	}
+
+	// Sorted so that a report is stable across runs; map order is not.
+	codes := make([]string, 0, len(c.Messages))
+	for code := range c.Messages {
+		codes = append(codes, string(code))
+	}
+	slices.Sort(codes)
+	for _, code := range codes {
+		msg := c.Messages[ErrorCode(code)]
+		check("template for "+code, msg.Template)
+		check("fallback for "+code, msg.Fallback)
+	}
+
+	check("default template", c.Default.Template)
+	check("default fallback", c.Default.Fallback)
+	check("suggestion suffix", c.SuggestionSuffix)
+	return problems
+}
+
+// placeholderNames lists the placeholder names a template references, including
+// repeats, in the order they appear.
+func placeholderNames(tmpl string) []string {
+	if !strings.ContainsRune(tmpl, '{') {
+		return nil
+	}
+	var names []string
+	rest := tmpl
+	for {
+		open := strings.IndexByte(rest, '{')
+		if open < 0 {
+			return names
+		}
+		close := strings.IndexByte(rest[open:], '}')
+		if close < 0 {
+			return names
+		}
+		close += open
+		names = append(names, rest[open+1:close])
+		rest = rest[close+1:]
+	}
+}

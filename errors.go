@@ -36,6 +36,19 @@ const (
 	CodeConfigError ErrorCode = "E0C01" // invalid configuration (e.g. undefined FailMode)
 )
 
+// builtinErrorCodes is the closed set declared above, in the same order.
+//
+// Adding a code without adding it here makes it invisible to Catalog.Validate,
+// which would then report a catalog as complete while that code renders as
+// generic text. Keep the two in step.
+var builtinErrorCodes = []ErrorCode{
+	CodeFormatMismatch, CodeTypeMismatch, CodeEnumInvalid, CodeRangeViolation,
+	CodeRequiredMissing, CodeArrayElement, CodeCUEOther,
+	CodeBizRuleFailed, CodeExprExecError, CodeBlobTypeMismatch,
+	CodeCondRequired, CodeMetaRuntimeError,
+	CodeConfigError,
+}
+
 // ValidationError represents a single validation failure.
 type ValidationError struct {
 	Code ErrorCode `json:"code"` // structured error code

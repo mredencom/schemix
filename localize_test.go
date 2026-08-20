@@ -2,8 +2,11 @@ package schemix
 
 import (
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode"
 )
 
 // friendlyMessageCases pins the exact wording of every branch FriendlyMessage
@@ -485,4 +488,236 @@ func TestUnknownPlaceholderFallsBack(t *testing.T) {
 	if got := alone.Localize(ValidationError{Code: CodeFormatMismatch, Path: "pan"}); got != genericFailureMessage {
 		t.Errorf("got %q, want %q", got, genericFailureMessage)
 	}
+}
+
+// --- ZhCN and startup validation ---
+
+// TestBuiltinCatalogsValidate is the check a user is expected to copy: a catalog
+// assembled at startup should be proven complete before it serves traffic, and
+// the built-in ones must pass their own bar.
+func TestBuiltinCatalogsValidate(t *testing.T) {
+	for name, c := range map[string]*Catalog{"EnUS": EnUS, "ZhCN": ZhCN} {
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s.Validate() = %v, want nil", name, err)
+		}
+	}
+}
+
+// TestZhCNTranslatesEveryCode catches the failure mode a coverage check cannot:
+// a catalog that is structurally complete because a code was copied from English
+// and never translated.
+func TestZhCNTranslatesEveryCode(t *testing.T) {
+	for _, code := range builtinErrorCodes {
+		e := ValidationError{
+			Code: code, Path: "字段", FieldType: "int",
+			Bound: ">0", EnumOptions: []string{"a", "b"}, Suggestion: "a",
+		}
+		zh, en := ZhCN.Localize(e), EnUS.Localize(e)
+		if zh == en {
+			t.Errorf("code %s renders identically in both catalogs: %q", code, zh)
+		}
+		if zh == genericFailureMessage {
+			t.Errorf("code %s fell through to the generic message", code)
+		}
+		if !hasHanCharacter(zh) {
+			t.Errorf("code %s produced no Chinese text: %q", code, zh)
+		}
+	}
+}
+
+// TestZhCNWording pins a few sentences so that a reword is a deliberate edit
+// rather than a side effect. Chinese typography puts a space around embedded
+// Latin runs, which is easy to lose when editing templates.
+func TestZhCNWording(t *testing.T) {
+	tests := []struct {
+		name string
+		err  ValidationError
+		want string
+	}{
+		{
+			name: "required",
+			err:  ValidationError{Code: CodeRequiredMissing, Path: "年龄"},
+			want: "年龄为必填项",
+		},
+		{
+			name: "no path",
+			err:  ValidationError{Code: CodeRequiredMissing},
+			want: "该值为必填项",
+		},
+		{
+			name: "type",
+			err:  ValidationError{Code: CodeTypeMismatch, Path: "年龄", FieldType: "int"},
+			want: "年龄的类型必须是 int",
+		},
+		{
+			name: "type without a known type",
+			err:  ValidationError{Code: CodeTypeMismatch, Path: "年龄"},
+			want: "年龄的类型不正确",
+		},
+		{
+			name: "enum with suggestion",
+			err: ValidationError{
+				Code: CodeEnumInvalid, Path: "币种",
+				EnumOptions: []string{"CNY", "USD"},
+				Suggestion:  "USD",
+			},
+			want: `币种必须是 ["CNY", "USD"] 中的一个，您是否想输入 "USD"？`,
+		},
+		{
+			name: "range",
+			err:  ValidationError{Code: CodeRangeViolation, Path: "年龄", Bound: "<=150"},
+			want: "年龄必须满足 <=150",
+		},
+		{
+			name: "range without a bound",
+			err:  ValidationError{Code: CodeRangeViolation, Path: "年龄"},
+			want: "年龄超出允许的范围",
+		},
+		{
+			name: "config error names no field",
+			err:  ValidationError{Code: CodeConfigError, Path: "无关"},
+			want: "校验配置无效",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ZhCN.Localize(tt.err); got != tt.want {
+				t.Errorf("got  %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCatalogValidateReportsProblems(t *testing.T) {
+	cycle := &Catalog{Messages: EnUS.Messages}
+	cycle.Fallback = cycle
+
+	a, b := &Catalog{Messages: EnUS.Messages}, &Catalog{Messages: EnUS.Messages}
+	a.Fallback, b.Fallback = b, a
+
+	tests := []struct {
+		name    string
+		catalog *Catalog
+		want    string
+	}{
+		{
+			name:    "no messages at all",
+			catalog: &Catalog{},
+			want:    "cover",
+		},
+		{
+			name: "one code missing with no fallback",
+			catalog: &Catalog{
+				Messages: withoutCode(EnUS.Messages, CodeRangeViolation),
+			},
+			want: string(CodeRangeViolation),
+		},
+		{
+			name: "unknown placeholder",
+			catalog: &Catalog{
+				Messages: map[ErrorCode]Message{CodeCUEOther: {Template: "{feild} is off"}},
+				Fallback: EnUS,
+			},
+			want: "feild",
+		},
+		{
+			name:    "self-referential fallback",
+			catalog: cycle,
+			want:    "cycle",
+		},
+		{
+			name:    "two-catalog cycle",
+			catalog: a,
+			want:    "cycle",
+		},
+		{
+			name: "template renders but fallback does not",
+			catalog: &Catalog{
+				Messages: map[ErrorCode]Message{
+					CodeTypeMismatch: {Template: "{field} must be {type}"},
+				},
+			},
+			want: string(CodeTypeMismatch),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.catalog.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want a problem report")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Validate() = %q, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCatalogValidateAcceptsPartialWithFallback keeps Validate from punishing the
+// pattern catalogs exist for: define one message, inherit the rest.
+func TestCatalogValidateAcceptsPartialWithFallback(t *testing.T) {
+	partial := &Catalog{
+		Messages: map[ErrorCode]Message{
+			CodeRequiredMissing: {Template: "please fill in {field}"},
+		},
+		Fallback: EnUS,
+	}
+	if err := partial.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil for a catalog backed by EnUS", err)
+	}
+}
+
+// TestCatalogConcurrentLocalize backs the documented promise that a catalog is
+// safe to share. It is read-only after construction, but "should be" is not
+// evidence — this runs under -race in CI.
+func TestCatalogConcurrentLocalize(t *testing.T) {
+	chained := &Catalog{
+		Labels:   map[string]string{"items[].price": "单价"},
+		Fallback: ZhCN,
+	}
+	errs := []ValidationError{
+		{Code: CodeRequiredMissing, Path: "年龄"},
+		{Code: CodeEnumInvalid, Path: "币种", EnumOptions: []string{"CNY", "USD"}, Suggestion: "USD"},
+		{Code: CodeRangeViolation, Path: "items[2].price", Bound: ">0"},
+		{Code: ErrorCode("E9Z99"), Path: ""},
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				for _, e := range errs {
+					for _, loc := range []Localizer{EnUS, ZhCN, chained} {
+						if loc.Localize(e) == "" {
+							t.Error("Localize returned an empty string")
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func withoutCode(src map[ErrorCode]Message, drop ErrorCode) map[ErrorCode]Message {
+	out := make(map[ErrorCode]Message, len(src))
+	for code, msg := range src {
+		if code != drop {
+			out[code] = msg
+		}
+	}
+	return out
+}
+
+func hasHanCharacter(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }
