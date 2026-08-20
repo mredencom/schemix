@@ -396,6 +396,42 @@ var EnUS = &Catalog{
 	SuggestionSuffix: " — did you mean {suggestion}?",
 }
 
+// LocalizedMessages renders every error with the Localizer configured via
+// WithLocalizer, or in English when none was configured.
+//
+// This is the counterpart to ErrorMessages, which returns the raw diagnostics
+// for logs. These are the strings to return to a caller:
+//
+//	if !r.Valid {
+//	    respond(w, 422, map[string]any{"errors": r.LocalizedMessages()})
+//	}
+//
+// Returns nil for a valid result, so len() is a safe test either way.
+func (r Result) LocalizedMessages() []string {
+	return r.LocalizedMessagesWith(r.loc)
+}
+
+// LocalizedMessagesWith renders every error with l, ignoring whatever
+// WithLocalizer configured. This is how one validator serves several languages:
+//
+//	msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
+//
+// A nil l falls back to English rather than panicking, since the argument is
+// often the result of a lookup that may miss.
+func (r Result) LocalizedMessagesWith(l Localizer) []string {
+	if len(r.Errors) == 0 {
+		return nil
+	}
+	if l == nil {
+		l = EnUS
+	}
+	out := make([]string, len(r.Errors))
+	for i, e := range r.Errors {
+		out[i] = l.Localize(e)
+	}
+	return out
+}
+
 // FriendlyMessage renders a user-facing sentence for the error.
 //
 // Message and FriendlyMessage are both always available, which is deliberate:

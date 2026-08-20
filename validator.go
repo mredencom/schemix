@@ -21,6 +21,7 @@ type Validator struct {
 	blobRules      []blobRule
 	cueFields      []cueField            // pre-compiled field descriptors for fast runtime validation
 	errorFormatter ErrorFormatter        // optional custom error message formatter
+	localizer      Localizer             // default for Result.LocalizedMessages (nil = EnUS)
 	blobEnv        *bloblang.Environment // isolated Bloblang environment (nil = use global)
 	metrics        MetricsRecorder       // optional observability hook (nil = zero overhead)
 	schemaName     string                // optional name for observability labels
@@ -109,6 +110,7 @@ func buildValidator(ctx *cue.Context, schema cue.Value, opts []Option) (*Validat
 		ctx:            ctx,
 		schema:         schema,
 		errorFormatter: cfg.errorFormatter,
+		localizer:      cfg.localizer,
 		blobEnv:        env,
 		metrics:        cfg.metricsRecorder,
 		schemaName:     cfg.schemaName,

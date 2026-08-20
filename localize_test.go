@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"sync"
@@ -720,4 +721,177 @@ func hasHanCharacter(s string) bool {
 		}
 	}
 	return false
+}
+
+// --- WithLocalizer and Result convenience ---
+
+const localizerTestSchema = `{currency: "CNY" | "USD", age: int & <=150}`
+
+// "USE" is one edit from "USD", so it produces a suggestion; a more distant
+// value would exceed maxSuggestionDistance and leave the suffix off, which would
+// silently drop that half of the rendering from these tests.
+var localizerTestData = map[string]any{"currency": "USE", "age": int64(200)}
+
+func TestLocalizedMessagesDefaultsToEnglish(t *testing.T) {
+	r := MustNew(localizerTestSchema).Process(localizerTestData)
+	got := r.LocalizedMessages()
+	want := []string{
+		`currency must be one of ["CNY", "USD"] — did you mean "USD"?`,
+		"age must be <=150",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestWithLocalizerSetsTheResultDefault(t *testing.T) {
+	v := MustNew(localizerTestSchema, WithLocalizer(ZhCN))
+	got := v.Process(localizerTestData).LocalizedMessages()
+	want := []string{
+		`currency必须是 ["CNY", "USD"] 中的一个，您是否想输入 "USD"？`,
+		"age必须满足 <=150",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+// TestLocalizedMessagesWithOverridesTheDefault covers the case the whole design
+// exists for: one validator, one request per language, chosen at render time.
+// Binding a locale at construction would need a validator per language.
+func TestLocalizedMessagesWithOverridesTheDefault(t *testing.T) {
+	v := MustNew(localizerTestSchema, WithLocalizer(ZhCN))
+	r := v.Process(localizerTestData)
+
+	if got := r.LocalizedMessagesWith(EnUS)[1]; got != "age must be <=150" {
+		t.Errorf("render-time override ignored: %q", got)
+	}
+	// The default must survive being overridden for one call.
+	if got := r.LocalizedMessages()[1]; got != "age必须满足 <=150" {
+		t.Errorf("default was clobbered by the override: %q", got)
+	}
+}
+
+func TestLocalizedMessagesEmptyWhenValid(t *testing.T) {
+	r := MustNew(localizerTestSchema).Process(map[string]any{"currency": "CNY", "age": int64(30)})
+	if !r.Valid {
+		t.Fatalf("expected a valid result, got %v", r.Errors)
+	}
+	if got := r.LocalizedMessages(); len(got) != 0 {
+		t.Errorf("LocalizedMessages() = %q, want empty", got)
+	}
+}
+
+func TestLocalizedMessagesWithNilFallsBackToEnglish(t *testing.T) {
+	r := MustNew(localizerTestSchema, WithLocalizer(ZhCN)).Process(localizerTestData)
+	if got := r.LocalizedMessagesWith(nil)[1]; got != "age must be <=150" {
+		t.Errorf("got %q, want the English default", got)
+	}
+}
+
+func TestWithLocalizerNilIsHarmless(t *testing.T) {
+	v := MustNew(localizerTestSchema, WithLocalizer(nil))
+	if got := v.Process(localizerTestData).LocalizedMessages()[1]; got != "age must be <=150" {
+		t.Errorf("got %q, want the English default", got)
+	}
+}
+
+// TestResultJSONExcludesLocalizer guards the reason the default is held on Result
+// rather than on ValidationError: the error is a DTO with json tags on every
+// field, and a Localizer must never reach an API response.
+func TestResultJSONExcludesLocalizer(t *testing.T) {
+	r := MustNew(localizerTestSchema, WithLocalizer(ZhCN)).Process(localizerTestData)
+
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	for key := range decoded {
+		switch key {
+		case "valid", "errors", "output":
+		default:
+			t.Errorf("unexpected key %q in encoded Result: %s", key, encoded)
+		}
+	}
+	// The same for the errors themselves.
+	var errs []map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["errors"], &errs); err != nil {
+		t.Fatalf("decode errors: %v", err)
+	}
+	allowed := map[string]bool{
+		"code": true, "path": true, "type": true, "field_type": true,
+		"message": true, "suggestion": true, "enum_options": true, "bound": true,
+	}
+	for _, e := range errs {
+		for key := range e {
+			if !allowed[key] {
+				t.Errorf("unexpected key %q in encoded ValidationError", key)
+			}
+		}
+	}
+}
+
+// TestWithLocalizerDoesNotAffectFriendlyMessage records a rough edge rather than
+// a feature. FriendlyMessage is a method on the error, the error carries no
+// locale, and giving it one would put a translation decision inside a serialised
+// DTO. So a validator configured for Chinese still answers English here.
+//
+// The test exists so that a later reader treats this as decided rather than
+// broken, and fixes the call site instead of the method.
+func TestWithLocalizerDoesNotAffectFriendlyMessage(t *testing.T) {
+	r := MustNew(localizerTestSchema, WithLocalizer(ZhCN)).Process(localizerTestData)
+
+	localized := r.LocalizedMessages()[1]
+	if localized != "age必须满足 <=150" {
+		t.Fatalf("LocalizedMessages() = %q, want Chinese", localized)
+	}
+	if friendly := r.Errors[1].FriendlyMessage(); friendly != "age must be <=150" {
+		t.Errorf("FriendlyMessage() = %q; it is always English by design", friendly)
+	}
+}
+
+// TestValidateFamilyHasNoDefaultLocalizer pins an asymmetry. Validate returns
+// (bool, []ValidationError) with no Result to carry a default, so a configured
+// localizer cannot reach it. Changing that signature is a breaking change, and
+// the explicit call is one line, so the gap stays — documented, not silent.
+func TestValidateFamilyHasNoDefaultLocalizer(t *testing.T) {
+	v := MustNew(localizerTestSchema, WithLocalizer(ZhCN))
+
+	valid, errs := v.Validate(localizerTestData)
+	if valid || len(errs) == 0 {
+		t.Fatal("expected validation to fail")
+	}
+	// English, because nothing carried the configured localizer here.
+	if got := errs[1].FriendlyMessage(); got != "age must be <=150" {
+		t.Errorf("FriendlyMessage() = %q", got)
+	}
+	// The supported way to localize on this path is to say so.
+	if got := ZhCN.Localize(errs[1]); got != "age必须满足 <=150" {
+		t.Errorf("ZhCN.Localize() = %q", got)
+	}
+}
+
+// TestLocalizerAndErrorFormatterAreOrthogonal keeps the two hooks from being
+// confused for alternatives: the formatter owns Message, which is for logs, and
+// the localizer owns what a person reads. Configuring both must not have one
+// overwrite the other.
+func TestLocalizerAndErrorFormatterAreOrthogonal(t *testing.T) {
+	v := MustNew(localizerTestSchema,
+		WithLocalizer(ZhCN),
+		WithErrorFormatter(func(code ErrorCode, path, detail string) string {
+			return "log:" + string(code) + ":" + path
+		}),
+	)
+	r := v.Process(localizerTestData)
+
+	if got, want := r.Errors[1].Message, "log:"+string(CodeRangeViolation)+":age"; got != want {
+		t.Errorf("Message = %q, want %q", got, want)
+	}
+	if got := r.LocalizedMessages()[1]; got != "age必须满足 <=150" {
+		t.Errorf("LocalizedMessages() = %q — the formatter must not reach it", got)
+	}
 }

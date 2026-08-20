@@ -60,6 +60,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 	result = Result{
 		Valid:  true,
 		Errors: []ValidationError{},
+		loc:    v.localizer,
 	}
 	defer func() {
 		if !result.Valid {

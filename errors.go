@@ -117,6 +117,16 @@ type Result struct {
 	Valid  bool              `json:"valid"`
 	Errors []ValidationError `json:"errors"`
 	Output map[string]any    `json:"output"`
+
+	// loc is the Localizer configured with WithLocalizer, used as the default by
+	// LocalizedMessages.
+	//
+	// It lives here, unexported, rather than on ValidationError, because that
+	// type is a DTO with a json tag on every field: an interface there would
+	// appear in API responses and add a word to every error in the slice. Being
+	// unexported also keeps it out of this struct's own JSON — see
+	// TestResultJSONExcludesLocalizer.
+	loc Localizer
 }
 
 // Err returns nil if validation passed, or a combined error from all
