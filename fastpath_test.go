@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 // TestFastpathThreeState verifies the three-state return signature:
@@ -722,5 +723,28 @@ func TestEnumLookup_StrategyDoesNotChangeBehaviour(t *testing.T) {
 				t.Errorf("want a single %s, got %v", CodeTypeMismatch, r3.Errors)
 			}
 		})
+	}
+}
+
+// TestFastResultSizeUnchanged locks the struct that carries every scalar field's
+// verdict at 56 bytes.
+//
+// The comment on fastResult records a measurement: adding a slice header here
+// grew it to 80 bytes and cost 6% on the scalar fast path, because the struct is
+// returned by value for every scalar field of every validation — a cost paid
+// even by schemas containing no list at all. 6% also exceeds the 5% benchmark
+// gate.
+//
+// This matters because it is a tempting place to put things. Enum candidates and
+// range bounds now reach ValidationError, and routing them through fastResult
+// would look like the direct way to do it. It is not: the consumer already holds
+// the *fastConstraint via cueField.fast, so the data is read where the error is
+// built instead. If this test fails, that reasoning was undone — see
+// docs/design-i18n-localizer.md §3.8 before changing the expected size.
+func TestFastResultSizeUnchanged(t *testing.T) {
+	const want = 56
+	if got := unsafe.Sizeof(fastResult{}); got != want {
+		t.Errorf("unsafe.Sizeof(fastResult{}) = %d, want %d — "+
+			"a field was added to the scalar hot path; carry the data on cueField.fast instead", got, want)
 	}
 }

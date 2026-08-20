@@ -217,8 +217,12 @@ func mergeDisjunctionGroup(group []ValidationError) (ValidationError, bool) {
 	merged := *summary
 	merged.Code = CodeEnumInvalid
 	merged.Message = fmt.Sprintf("value %s not in enum [%s]", input, strings.Join(candidates, ", "))
-	if unquoted, err := strconv.Unquote(input); err == nil {
-		merged.Suggestion = suggestClosest(unquoted, unquoteAll(candidates))
+	// candidates arrive quoted, straight out of the CUE wording. The slice is
+	// local to this function, so the unquoted copy can be handed out as is.
+	unquoted := unquoteAll(candidates)
+	merged.EnumOptions = unquoted
+	if in, err := strconv.Unquote(input); err == nil {
+		merged.Suggestion = suggestClosest(in, unquoted)
 	}
 	return merged, true
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 
 	"cuelang.org/go/cue"
@@ -1059,4 +1060,38 @@ func toInt64(v any) (int64, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+// enumOptionsOf returns the candidates a descriptor declares, in declaration
+// order, formatted exactly as the matching *EnumDetail function renders them —
+// so a sentence rebuilt from these values agrees with Detail down to the byte.
+//
+// The returned slice is always a fresh allocation. fastConstraint is built once
+// in New() and shared by every concurrent Process, so handing out stringEnums
+// itself would let one caller's sort or append silently rewrite the schema for
+// every subsequent validation. That allocation happens only on the error path.
+//
+// This is deliberately read at the point the error is built, not carried on
+// fastResult: see TestFastResultSizeUnchanged for the 6% reason why.
+func enumOptionsOf(fc *fastConstraint) []string {
+	if fc == nil {
+		return nil
+	}
+	switch {
+	case fc.stringEnums != nil:
+		return slices.Clone(fc.stringEnums)
+	case fc.intEnums != nil:
+		out := make([]string, len(fc.intEnums))
+		for i, e := range fc.intEnums {
+			out[i] = strconv.FormatInt(e, 10)
+		}
+		return out
+	case fc.floatEnums != nil:
+		out := make([]string, len(fc.floatEnums))
+		for i, e := range fc.floatEnums {
+			out[i] = strconv.FormatFloat(e, 'g', -1, 64)
+		}
+		return out
+	}
+	return nil
 }

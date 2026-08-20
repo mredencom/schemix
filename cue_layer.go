@@ -174,6 +174,9 @@ func (v *Validator) listErrors(f *cueField, err error) []ValidationError {
 	// error per offending field.
 	collected = collapseDisjunctionErrors(collected)
 	for i := range collected {
+		// Message still holds the raw CUE text at this point; lift what a
+		// localizer needs before a formatter is given the chance to replace it.
+		attachStructuredFields(&collected[i], nil, collected[i].Message)
 		collected[i].Message = v.formatMessage(
 			collected[i].Code, collected[i].Path, collected[i].Message)
 	}
@@ -199,13 +202,15 @@ func (v *Validator) validateScalarField(f *cueField, fieldData cue.Value, result
 // their own because they also carry a Suggestion.
 func (v *Validator) recordFieldError(result *Result, f *cueField, code ErrorCode, path, detail string) {
 	result.Valid = false
-	result.Errors = append(result.Errors, ValidationError{
+	e := ValidationError{
 		Code:      code,
 		Path:      path,
 		Type:      TypeCUE,
-		Message:   v.formatMessage(code, path, detail),
 		FieldType: f.fieldType,
-	})
+	}
+	attachStructuredFields(&e, f.fast, detail)
+	e.Message = v.formatMessage(code, path, detail)
+	result.Errors = append(result.Errors, e)
 }
 
 // checkFast runs the Go-native descriptor for one field and records any
@@ -228,14 +233,16 @@ func (v *Validator) checkFast(f *cueField, goVal any, result *Result) bool {
 	}
 	if !fr.Valid {
 		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
+		e := ValidationError{
 			Code:       fr.Code,
 			Path:       f.path,
 			Type:       TypeCUE,
-			Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
 			FieldType:  f.fieldType,
 			Suggestion: fr.Suggestion,
-		})
+		}
+		attachStructuredFields(&e, f.fast, fr.Detail)
+		e.Message = v.formatMessage(fr.Code, f.path, fr.Detail)
+		result.Errors = append(result.Errors, e)
 	}
 	return true
 }
@@ -254,14 +261,17 @@ func (v *Validator) checkFastList(f *cueField, goVal any, result *Result) bool {
 		result.Valid = false
 		for _, ef := range failures {
 			ePath := indexedPath(f.path, ef.Index)
-			result.Errors = append(result.Errors, ValidationError{
+			e := ValidationError{
 				Code:       ef.Code,
 				Path:       ePath,
 				Type:       TypeCUE,
-				Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
 				FieldType:  f.fieldType,
 				Suggestion: ef.Suggestion,
-			})
+			}
+			// Candidates live on the element descriptor, not the list's own.
+			attachStructuredFields(&e, f.fast.elem, ef.Detail)
+			e.Message = v.formatMessage(ef.Code, ePath, ef.Detail)
+			result.Errors = append(result.Errors, e)
 		}
 	}
 	return true

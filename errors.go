@@ -56,6 +56,42 @@ type ValidationError struct {
 	// confidence. Only enum violations populate it — a range or regex violation
 	// has no meaningful correction to guess, and inventing one would mislead.
 	Suggestion string `json:"suggestion,omitempty"`
+
+	// EnumOptions lists every value the schema accepts, in declaration order.
+	// Only enum violations populate it.
+	//
+	// Values are unquoted: "CNY", not "\"CNY\"". Message renders string
+	// candidates quoted and numeric ones bare, but that is a rendering decision,
+	// and baking it into the data would force every consumer — a form's dropdown,
+	// a translation layer — to strip the quotes back off.
+	EnumOptions []string `json:"enum_options,omitempty"`
+
+	// Bound is the comparison the value failed, such as "<=150" or ">0". Only
+	// range violations populate it, and only the side that was actually broken:
+	// a value above the maximum of `>=0 & <=150` reports "<=150".
+	Bound string `json:"bound,omitempty"`
+}
+
+// attachStructuredFields lifts the data needed to rebuild a message out of the
+// descriptor and the raw detail text.
+//
+// It must run before formatMessage. A custom ErrorFormatter replaces Message
+// with arbitrary text, so anything recovered from Message afterwards would
+// disappear the moment a formatter is configured — which is exactly the
+// fragility these fields exist to remove.
+//
+// fc may be nil. A struct field, or a scalar the descriptor declined to decide,
+// has no fastConstraint; Bound is still recoverable from the detail text, while
+// EnumOptions is filled by the CUE path itself (see collapseDisjunctionErrors).
+func attachStructuredFields(e *ValidationError, fc *fastConstraint, detail string) {
+	switch e.Code {
+	case CodeEnumInvalid:
+		if e.EnumOptions == nil {
+			e.EnumOptions = enumOptionsOf(fc)
+		}
+	case CodeRangeViolation:
+		e.Bound = boundFromDetail(detail)
+	}
 }
 
 // Error implements the error interface for ValidationError.
