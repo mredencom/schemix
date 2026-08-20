@@ -478,13 +478,22 @@ func enumOptionsFromDetail(detail string) string {
 // fallback: a descriptor holding both a minimum and a maximum cannot say which
 // one a value broke without comparing again, while the detail text — generated
 // by this package, not by CUE — already names the side that failed.
+//
+// One path does report CUE's own wording, and CUE parenthesises it:
+// `items.0.price: invalid value -5 (out of bound >0)`. A comparison never
+// contains a closing paren, so cutting at one separates the bound from the
+// punctuation around it. Without this, the sentence read "must be >0)".
 func boundFromDetail(detail string) string {
 	const marker = "out of bound "
 	i := strings.Index(detail, marker)
 	if i < 0 {
 		return ""
 	}
-	return strings.TrimSpace(detail[i+len(marker):])
+	bound := detail[i+len(marker):]
+	if end := strings.IndexByte(bound, ')'); end >= 0 {
+		bound = bound[:end]
+	}
+	return strings.TrimSpace(bound)
 }
 
 // ErrorFormatter customizes the raw diagnostic in ValidationError.Message.

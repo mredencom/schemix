@@ -220,6 +220,15 @@ func TestFriendlyMessageExactWordingFromRealValidation(t *testing.T) {
 			path:   "tags[1]",
 			want:   `tags[1] must be one of ["a", "b"]`,
 		},
+		{
+			// CUE's own range wording is parenthesised, and the paren must not
+			// end up inside the sentence: "must be >0)" is what a user saw.
+			name:   "struct list element range",
+			schema: `{items: [...{price: number & >0}]}`,
+			data:   map[string]any{"items": []any{map[string]any{"price": -5.0}}},
+			path:   "items[0].price",
+			want:   "items[0].price must be >0",
+		},
 	}
 
 	for _, tt := range tests {

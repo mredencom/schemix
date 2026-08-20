@@ -543,6 +543,16 @@ func TestValidationErrorBound(t *testing.T) {
 			path:   "cfg.age",
 			want:   "<=150",
 		},
+		{
+			// A struct element is the one path that reports CUE's own wording,
+			// which parenthesises the bound: "invalid value -5 (out of bound >0)".
+			// The closing paren is not part of the comparison.
+			name:   "struct list element carries CUE's parenthesised wording",
+			schema: `{items: [...{price: number & >0}]}`,
+			data:   map[string]any{"items": []any{map[string]any{"price": -5.0}}},
+			path:   "items[0].price",
+			want:   ">0",
+		},
 	}
 
 	for _, tt := range tests {
