@@ -24,7 +24,7 @@ func (v *Validator) ProcessWithMode(data map[string]any, mode FailMode) Result {
 		return Result{
 			Valid:  false,
 			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
-			loc:    v.localizer,
+			v:      v,
 		}
 	}
 	return v.withValidationMetrics(func() Result {
@@ -47,7 +47,7 @@ func (v *Validator) ProcessWithModeContext(ctx context.Context, data map[string]
 		return Result{
 			Valid:  false,
 			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
-			loc:    v.localizer,
+			v:      v,
 		}
 	}
 	return v.withValidationMetricsCtx(ctx, mode, func(ctx context.Context) Result {
@@ -78,7 +78,7 @@ func (v *Validator) ProcessValueWithModeContext(ctx context.Context, data any, m
 		return Result{
 			Valid:  false,
 			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
-			loc:    v.localizer,
+			v:      v,
 		}
 	}
 	return v.ProcessWithModeContext(ctx, m, mode)
@@ -111,7 +111,7 @@ func (v *Validator) ProcessValueWithMode(data any, mode FailMode) Result {
 		return Result{
 			Valid:  false,
 			Errors: []ValidationError{{Code: CodeConfigError, Type: TypeConfig, Message: err.Error()}},
-			loc:    v.localizer,
+			v:      v,
 		}
 	}
 	return v.ProcessWithMode(m, mode)

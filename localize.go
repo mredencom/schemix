@@ -408,7 +408,11 @@ var EnUS = &Catalog{
 //
 // Returns nil for a valid result, so len() is a safe test either way.
 func (r Result) LocalizedMessages() []string {
-	return r.LocalizedMessagesWith(r.loc)
+	var loc Localizer
+	if r.v != nil {
+		loc = r.v.localizer
+	}
+	return r.LocalizedMessagesWith(loc)
 }
 
 // LocalizedMessagesWith renders every error with l, ignoring whatever

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestResult_HasCode(t *testing.T) {
@@ -670,5 +671,26 @@ func TestBoundEmptyForOverflowRangeErrors(t *testing.T) {
 	}
 	if e.Bound != "" {
 		t.Errorf("Bound = %q, want empty — no declared bound was broken", e.Bound)
+	}
+}
+
+// TestResultSizeStaysSmall locks the struct returned by value from every Process
+// and Validate call.
+//
+// Holding a Localizer interface here instead of a pointer grew it from 40 to 56
+// bytes and cost 5.4ns on Validate with one scalar list element — 143.0ns to
+// 148.4ns, measured, which is 3.8% of a benchmark small enough for a fixed cost
+// to show. At 48 bytes it is 142.8ns, back at the baseline; the two words appear
+// to push the return past what the register ABI carries.
+//
+// That is the whole reason Result holds *Validator and reads the localizer
+// through it, rather than holding the Localizer directly, which would read
+// better. If this test fails, check Validate_ScalarList/elements_1 before
+// updating the number.
+func TestResultSizeStaysSmall(t *testing.T) {
+	const want = 48
+	if got := unsafe.Sizeof(Result{}); got != want {
+		t.Errorf("unsafe.Sizeof(Result{}) = %d, want %d — "+
+			"a wide field was added to a struct returned by value from every call", got, want)
 	}
 }
