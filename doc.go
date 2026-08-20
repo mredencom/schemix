@@ -60,25 +60,81 @@
 //
 // # Error Handling
 //
-// Result provides multiple ways to inspect errors:
+// Errors serve three audiences, and Result has a set of methods for each.
 //
-//	r := v.Process(data)
-//	r.Valid                         // bool
-//	r.Err()                         // combined error (nil if valid)
-//	r.FirstError()                  // *ValidationError
-//	r.ErrorsByPath("pan")           // []ValidationError
-//	r.ErrorsByCode(CodeTypeMismatch)// []ValidationError
-//	r.ErrorsByType("cue")           // []ValidationError — filter by layer
-//	r.HasCode(CodeBizRuleFailed)    // bool — quick check
-//	r.HasErrorsAt("email")          // bool — field-level check
+// For a person — localized text, ready to return to a caller:
 //
-// # Custom Error Messages (i18n)
+//	r.LocalizedMessages()               // []string, in the configured language
+//	r.LocalizedMessagesWith(loc)        // []string, in a language chosen now
+//	loc.Localize(e)                     // one error
 //
-// Provide a custom ErrorFormatter to generate user-facing messages:
+// For a log — the raw diagnostic, carrying CUE/Bloblang wording:
 //
-//	v := schemix.MustNew(schema, schemix.WithErrorFormatter(func(code ErrorCode, path, detail string) string {
-//	    return myI18n.Translate("zh-CN", string(code), path)
-//	}))
+//	r.ErrorMessages()                   // one per line, with error codes
+//	e.Message                           // the diagnostic for one error
+//
+// For code — structured fields to branch on:
+//
+//	r.Valid                          // bool
+//	r.Err()                          // combined error (nil if valid)
+//	r.FirstError()                   // *ValidationError
+//	r.ErrorsByPath("pan")            // []ValidationError
+//	r.ErrorsByCode(CodeTypeMismatch) // []ValidationError
+//	r.ErrorsByType("cue")            // []ValidationError — filter by layer
+//	r.HasCode(CodeBizRuleFailed)     // bool — quick check
+//	r.HasErrorsAt("email")           // bool — field-level check
+//
+// Returning e.Message to a caller is the mistake to avoid: it leaks schema
+// internals and is never translated.
+//
+// # Localization
+//
+// A Localizer renders an error as text for a person. Set one for the whole
+// validator when the service speaks one language:
+//
+//	v := schemix.MustNew(schema, schemix.WithLocalizer(schemix.ZhCN))
+//	msgs := v.Process(data).LocalizedMessages()
+//
+// Or choose per request when it speaks several — one validator, concurrently:
+//
+//	msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
+//
+// EnUS and ZhCN are built in. Override individual messages by chaining, rather
+// than copying the table, so reworded built-ins keep reaching you:
+//
+//	var myCatalog = &schemix.Catalog{
+//	    Messages: map[schemix.ErrorCode]schemix.Message{
+//	        schemix.CodeRequiredMissing: {Template: "please fill in {field}"},
+//	    },
+//	    Labels:   map[string]string{"user_email": "Email address"},
+//	    Fallback: schemix.EnUS,
+//	}
+//
+// Call Catalog.Validate at startup to be told about gaps — an uncovered code
+// renders as generic wording rather than failing, so nothing else will tell you.
+//
+// Localizer is an interface, so an existing translation pipeline can be used
+// directly instead of moving its catalogue into Go.
+//
+// Two things it does not affect: ValidationError.FriendlyMessage is always
+// English, and the Validate family carries no default because it returns errors
+// without a Result. Localize those explicitly.
+//
+// # Custom Error Messages
+//
+// ErrorFormatter replaces ValidationError.Message, which is the diagnostic meant
+// for logs:
+//
+//	v := schemix.MustNew(schema, schemix.WithErrorFormatter(
+//	    func(code ErrorCode, path, detail string) string {
+//	        return fmt.Sprintf("%s[%s]: %s", path, code, detail)
+//	    },
+//	))
+//
+// It is not the way to translate: it receives three strings rather than the whole
+// error, and it overwrites the text a developer needs when debugging. Use a
+// Localizer for user-facing wording. The two are independent and can be set
+// together.
 //
 // # Custom Functions and Methods
 //

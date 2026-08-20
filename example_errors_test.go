@@ -2,6 +2,7 @@ package schemix_test
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/mredencom/schemix"
 )
@@ -98,25 +99,21 @@ func ExampleValidationError_FriendlyMessage() {
 	// friendly:   currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 }
 
-// WithErrorFormatter replaces Message wholesale, which is how i18n is done.
-// The formatter receives the stable error code, the field path, and the default
-// detail text.
+// WithErrorFormatter rewrites Message, the diagnostic meant for logs. Use it to
+// match a log format — prefixing the code and path, say, or emitting a single
+// line a parser downstream expects.
+//
+// It is not the way to translate. Message is what a developer reads while
+// debugging, and replacing it with user-facing text leaves nothing to debug from;
+// the formatter also sees only three strings, so it cannot name the accepted
+// values of an enum or the bound a number broke. See ExampleWithLocalizer.
 func ExampleWithErrorFormatter() {
-	zh := map[schemix.ErrorCode]string{
-		schemix.CodeRequiredMissing: "此字段为必填项",
-		schemix.CodeRangeViolation:  "数值超出范围",
-		schemix.CodeEnumInvalid:     "值不在允许范围内",
-	}
-
 	v := schemix.MustNew(`{
 		age:      int & >=0 & <=150
 		currency: "CNY" | "USD"
 	}`, schemix.WithErrorFormatter(
 		func(code schemix.ErrorCode, path, detail string) string {
-			if msg, ok := zh[code]; ok {
-				return fmt.Sprintf("%s: %s", path, msg)
-			}
-			return detail
+			return fmt.Sprintf("[%s] %s: %s", code, path, detail)
 		},
 	))
 
@@ -125,6 +122,121 @@ func ExampleWithErrorFormatter() {
 		fmt.Println(e.Message)
 	}
 	// Output:
-	// age: 数值超出范围
-	// currency: 值不在允许范围内
+	// [E1R01] age: value 200 out of bound <=150
+	// [E1E01] currency: value "JPY" not in enum ["CNY", "USD"]
+}
+
+// WithLocalizer sets the language for user-facing text. ZhCN and EnUS ship with
+// the package.
+//
+// Note that e.Message keeps the raw diagnostic: one is for the caller, the other
+// for the log, and both are available at once.
+func ExampleWithLocalizer() {
+	v := schemix.MustNew(`{
+		age:      int & >=0 & <=150
+		currency: "CNY" | "USD"
+	}`, schemix.WithLocalizer(schemix.ZhCN))
+
+	r := v.Process(map[string]any{"age": int64(200), "currency": "USE"})
+	for _, msg := range r.LocalizedMessages() {
+		fmt.Println(msg)
+	}
+	// Output:
+	// age必须满足 <=150
+	// currency必须是 ["CNY", "USD"] 中的一个，您是否想输入 "USD"？
+}
+
+// A service answering several languages picks one per request instead of per
+// validator. The same validator serves all of them, concurrently.
+func ExampleResult_LocalizedMessagesWith() {
+	v := schemix.MustNew(`{age: int & <=150}`)
+	r := v.Process(map[string]any{"age": int64(200)})
+
+	for _, lang := range []string{"en", "zh"} {
+		loc := schemix.Localizer(schemix.EnUS)
+		if lang == "zh" {
+			loc = schemix.ZhCN
+		}
+		fmt.Printf("%s: %s\n", lang, r.LocalizedMessagesWith(loc)[0])
+	}
+	// Output:
+	// en: age must be <=150
+	// zh: age必须满足 <=150
+}
+
+// Catalog covers what most services need: override the messages that matter,
+// rename fields for display, and chain the rest to a built-in catalog so that
+// reworded defaults keep arriving.
+//
+// Labels ignore array indices, so one entry covers every element.
+func ExampleCatalog() {
+	forms := &schemix.Catalog{
+		Messages: map[schemix.ErrorCode]schemix.Message{
+			schemix.CodeRequiredMissing: {Template: "Please provide {field}."},
+			schemix.CodeRangeViolation: {
+				Template: "{field} must be {bound}.",
+				Fallback: "{field} is out of range.",
+			},
+		},
+		Labels: map[string]string{
+			"contact_email": "Your email address",
+			"items[].price": "Item price",
+		},
+		Fallback: schemix.EnUS,
+	}
+	// Worth doing at startup: an uncovered code degrades to generic wording
+	// rather than failing, so nothing else reports it.
+	if err := forms.Validate(); err != nil {
+		fmt.Println("catalog problem:", err)
+		return
+	}
+
+	v := schemix.MustNew(`{
+		contact_email: string
+		items: [...{price: number & >0}]
+	}`, schemix.WithLocalizer(forms))
+
+	r := v.Process(map[string]any{
+		"items": []any{
+			map[string]any{"price": 10.0},
+			map[string]any{"price": -5.0},
+		},
+	})
+	for _, msg := range r.LocalizedMessages() {
+		fmt.Println(msg)
+	}
+	// Output:
+	// Please provide Your email address.
+	// Item price must be >0.
+}
+
+// Localizer is an interface because translation infrastructure usually already
+// exists. This one delegates to whatever the surrounding application uses,
+// keeping the structured fields available for interpolation.
+func ExampleLocalizer() {
+	v := schemix.MustNew(`{currency: "CNY" | "USD"}`,
+		schemix.WithLocalizer(translator{lang: "fr"}))
+
+	r := v.Process(map[string]any{"currency": "USE"})
+	fmt.Println(r.LocalizedMessages()[0])
+	// Output:
+	// [fr] currency n'accepte que ["CNY", "USD"]
+}
+
+// translator stands in for an existing i18n pipeline — gettext, ICU, a database
+// of strings. NormalizePath is exported so an implementation can look keys up the
+// way Catalog does, collapsing items[3].price to items[].price.
+type translator struct{ lang string }
+
+func (t translator) Localize(e schemix.ValidationError) string {
+	key := schemix.NormalizePath(e.Path)
+	switch e.Code {
+	case schemix.CodeEnumInvalid:
+		return fmt.Sprintf("[%s] %s n'accepte que [%s]", t.lang, key,
+			`"`+strings.Join(e.EnumOptions, `", "`)+`"`)
+	case schemix.CodeRangeViolation:
+		return fmt.Sprintf("[%s] %s doit être %s", t.lang, key, e.Bound)
+	}
+	// Never empty: callers render the result unconditionally.
+	return fmt.Sprintf("[%s] %s est invalide", t.lang, key)
 }

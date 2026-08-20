@@ -205,7 +205,14 @@ func (r Result) HasErrorsAt(path string) bool {
 	return false
 }
 
-// ErrorMessages returns all error messages joined by newline.
+// ErrorMessages returns the raw diagnostics, one per line.
+//
+// Each line carries the error code and the CUE/Bloblang wording, which makes
+// this the string for a log, not for a response body. LocalizedMessages is the
+// user-facing counterpart:
+//
+//	log.Warn(r.ErrorMessages())    // [E1R01] age: value 200 out of bound <=150
+//	r.LocalizedMessages()          // ["age must be <=150"]
 func (r Result) ErrorMessages() string {
 	if len(r.Errors) == 0 {
 		return ""
