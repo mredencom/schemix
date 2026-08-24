@@ -885,10 +885,14 @@ v, _ := schemix.New(schema,
 | `ObserveLayerDuration(layer, d, schemaName)` | 每层一次 —— `cue`、`blob` |
 | `ObserveErrorCode(code, schemaName)` | 每条校验错误一次 |
 | `ObserveBlobExecution(path, d, success)` | 每次 `@blob` 规则执行一次 |
-| `ObserveFastpathDecision(path, hit)` | 每个持有 fast 约束的字段一次 |
+| `ObserveFastpathDecision(path, hit)` | 每个持有 fast 约束的字段一次 —— 见下方说明 |
 
 > 实现必须并发安全且非阻塞 —— 它们在每次调用中同步执行。
 > 请异步缓冲批量上报，不要在其中做网络 I/O。
+
+> **`FailFast` 上报的 fastpath 决策更少。** 字段遍历在第一个失败处结束，因此
+> `ObserveFastpathDecision` 只对实际访问到的字段触发。用这些调用次数推断 schema
+> 的字段数在 `FailAll` 与 `FailPriority` 下成立，在 `FailFast` 下不成立。
 
 ### 开箱可用的 recorder
 

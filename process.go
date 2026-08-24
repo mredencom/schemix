@@ -101,7 +101,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 		cueScope = v.beginLayer(ctx, "schemix.cue", LayerCUE)
 	}
 	dataValue := newLazyCUEValue(v.ctx, data)
-	v.validateCUEFields(v.cueFields, dataValue, data, &result)
+	v.validateCUEFields(v.cueFields, dataValue, data, &result, mode == FailFast)
 	if observed {
 		cueScope.end()
 	}
@@ -121,7 +121,12 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 
 	// Preserve the CUE-layer failures before Blob errors are appended. A rule on
 	// the same field must never execute after its CUE constraint has failed.
-	cueErrors := append([]ValidationError(nil), result.Errors...)
+	//
+	// A prefix length rather than a copy: the blob loop only ever appends, so the
+	// first nCUEErrors entries stay the CUE-layer ones even after a reallocation,
+	// since append carries the old contents over. Copying them cost one
+	// allocation of len(Errors) ValidationError, which is 136 bytes each.
+	nCUEErrors := len(result.Errors)
 
 	// Layer 2: @blob + @meta rules
 	var blobScope layerScope
@@ -135,7 +140,7 @@ func (v *Validator) processInternal(ctx context.Context, data map[string]any, mo
 		rule := &v.blobRules[i]
 		meta := &rule.Meta
 
-		if hasValidationErrorAtPath(cueErrors, rule.Path) {
+		if hasValidationErrorAtPath(result.Errors[:nCUEErrors], rule.Path) {
 			// Mark only — see markFailed's note on why priorityHasError stays.
 			st.failedPaths[rule.Path] = true
 			continue
@@ -393,10 +398,18 @@ func (v *Validator) checkBlobResultType(path string, val any, result *Result) bo
 }
 
 // findCUEField searches the pre-compiled field tree for a field at the given dot-path.
+//
+// The path is walked segment by segment rather than through strings.Split,
+// which would allocate a slice on every call. fieldPriorityByPath calls this
+// twice per error under FailPriority, so those allocations showed up as a
+// measurable share of a failing validation.
 func (v *Validator) findCUEField(fields []cueField, path string) *cueField {
-	parts := strings.Split(path, ".")
 	current := fields
-	for i, part := range parts {
+	for {
+		part, rest := path, ""
+		if i := strings.IndexByte(path, '.'); i >= 0 {
+			part, rest = path[:i], path[i+1:]
+		}
 		idx := -1
 		for j := range current {
 			if current[j].name == part {
@@ -407,12 +420,12 @@ func (v *Validator) findCUEField(fields []cueField, path string) *cueField {
 		if idx < 0 {
 			return nil
 		}
-		if i == len(parts)-1 {
+		if rest == "" {
 			return &current[idx]
 		}
 		current = current[idx].children
+		path = rest
 	}
-	return nil
 }
 
 // fieldPriorityByPath looks up the priority of a field by its dot-path from cueFields.

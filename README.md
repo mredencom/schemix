@@ -907,10 +907,15 @@ v, _ := schemix.New(schema,
 | `ObserveLayerDuration(layer, d, schemaName)` | once per layer — `cue`, `blob` |
 | `ObserveErrorCode(code, schemaName)` | once per validation error |
 | `ObserveBlobExecution(path, d, success)` | once per `@blob` rule execution |
-| `ObserveFastpathDecision(path, hit)` | once per field holding a fast constraint |
+| `ObserveFastpathDecision(path, hit)` | once per field holding a fast constraint — see the note below |
 
 > Implementations must be concurrency-safe and non-blocking — they run inline on
 > every call. Buffer and batch asynchronously rather than doing network I/O.
+
+> **`FailFast` reports fewer fastpath decisions.** The field walk ends at the
+> first failure, so `ObserveFastpathDecision` fires only for the fields actually
+> visited. Counting these calls to infer a schema's field count works under
+> `FailAll` and `FailPriority`, not under `FailFast`.
 
 ### Ready-made recorders
 

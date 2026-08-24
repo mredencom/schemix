@@ -133,6 +133,11 @@ type MetricsRecorder interface {
 	// ObserveFastpathDecision is called once per field that has a compiled
 	// Go-native fast constraint, reporting whether the fast path successfully
 	// handled the field (hit=true) or fell back to the CUE path (hit=false).
+	//
+	// FailFast is the exception: the field walk ends at the first failure, so
+	// only the fields actually visited are reported. Counting these calls to
+	// infer a schema's field count is therefore safe under FailAll and
+	// FailPriority but not under FailFast.
 	ObserveFastpathDecision(fieldPath string, hit bool)
 
 	// ObserveErrorCode is called once per validation error in the result,

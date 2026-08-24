@@ -298,7 +298,7 @@ func BenchmarkCUE_ValidateFields(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		result := &Result{Valid: true, Errors: []ValidationError{}}
-		v.validateCUEFields(v.cueFields, dataValue, benchDataValid, result)
+		v.validateCUEFields(v.cueFields, dataValue, benchDataValid, result, false)
 	}
 }
 
