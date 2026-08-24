@@ -66,6 +66,46 @@ func (v *Validator) withValidationMetricsCtx(ctx context.Context, mode FailMode,
 	return result
 }
 
+// layerScope carries the span and timer for one validation layer. Whichever of
+// the two is not configured costs nothing: span stays nil and start stays the
+// zero Time, and end() checks both before touching them.
+//
+// It is a value type closed by an explicit end() rather than a deferred
+// closure, because a closure capturing *Validator escapes to the heap and both
+// layers open on every Process call.
+type layerScope struct {
+	v     *Validator
+	layer string
+	span  trace.Span
+	start time.Time
+}
+
+// beginLayer opens the observability scope for a layer. spanName is the OTel
+// span name, layer the metrics label — LayerCUE or LayerBlob.
+func (v *Validator) beginLayer(ctx context.Context, spanName, layer string) layerScope {
+	s := layerScope{v: v, layer: layer}
+	// Order matters: with no tracer configured, ctx is never inspected. That is
+	// what keeps a ProcessContext(nil, …) call from panicking in SpanFromContext
+	// on the untraced path, and it preserves the original short-circuit.
+	if v.tracer != nil && trace.SpanFromContext(ctx).IsRecording() {
+		_, s.span = v.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
+	}
+	if v.metrics != nil {
+		s.start = time.Now()
+	}
+	return s
+}
+
+// end reports the layer duration and closes the span.
+func (s layerScope) end() {
+	if s.v.metrics != nil {
+		s.v.metrics.ObserveLayerDuration(s.layer, time.Since(s.start), s.v.schemaName)
+	}
+	if s.span != nil {
+		s.span.End()
+	}
+}
+
 // Layer constants identify validation layers in ObserveLayerDuration calls.
 const (
 	LayerCUE  = "cue"
@@ -93,6 +133,11 @@ type MetricsRecorder interface {
 	// ObserveFastpathDecision is called once per field that has a compiled
 	// Go-native fast constraint, reporting whether the fast path successfully
 	// handled the field (hit=true) or fell back to the CUE path (hit=false).
+	//
+	// FailFast is the exception: the field walk ends at the first failure, so
+	// only the fields actually visited are reported. Counting these calls to
+	// infer a schema's field count is therefore safe under FailAll and
+	// FailPriority but not under FailFast.
 	ObserveFastpathDecision(fieldPath string, hit bool)
 
 	// ObserveErrorCode is called once per validation error in the result,

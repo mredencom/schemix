@@ -145,6 +145,16 @@ func ExampleValidator_ProcessValue_httpHandler() {
 		password: string @blob(this.password.str_len(min: 8, max: 64))
 	}`)
 
+	// catalogFor stands in for whatever maps a request to a language. Returning
+	// the interface rather than *Catalog is what lets an application swap in its
+	// own i18n pipeline later without touching the handler.
+	catalogFor := func(header string) schemix.Localizer {
+		if strings.HasPrefix(header, "zh") {
+			return schemix.ZhCN
+		}
+		return schemix.EnUS
+	}
+
 	respond := func(w http.ResponseWriter, status int, body any) {
 		// Before WriteHeader — afterwards the header is silently discarded.
 		w.Header().Set("Content-Type", "application/json")
@@ -165,12 +175,16 @@ func ExampleValidator_ProcessValue_httpHandler() {
 				respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})
 				return
 			}
+			// Localize per request rather than per validator, so one compiled
+			// schema serves every language. e.Message holds raw CUE/Bloblang
+			// wording — log it, don't return it.
+			loc := catalogFor(req.Header.Get("Accept-Language"))
 			details := make([]map[string]string, len(r.Errors))
 			for i, e := range r.Errors {
 				details[i] = map[string]string{
 					"field":   e.Path,
 					"code":    string(e.Code),
-					"message": e.FriendlyMessage(),
+					"message": loc.Localize(e),
 				}
 			}
 			respond(w, http.StatusUnprocessableEntity, map[string]any{
@@ -182,22 +196,30 @@ func ExampleValidator_ProcessValue_httpHandler() {
 		respond(w, http.StatusCreated, map[string]any{"username": r.Output["username"]})
 	}
 
-	post := func(label, payload string) {
+	post := func(label, lang, payload string) {
 		rec := httptest.NewRecorder()
-		handler(rec, httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(payload)))
+		req := httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(payload))
+		if lang != "" {
+			req.Header.Set("Accept-Language", lang)
+		}
+		handler(rec, req)
 		fmt.Printf("%-11s %d %s | %s", label,
 			rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
 
-	post("valid:", `{"username":"alice_dev","age":28,"role":"user",
+	const badAge = `{"username":"alice_dev","age":200,"role":"user",
+		"email":"alice@example.com","password":"correct-horse"}`
+
+	post("valid:", "", `{"username":"alice_dev","age":28,"role":"user",
 		"email":"alice@example.com","password":"correct-horse"}`)
-	post("age:", `{"username":"alice_dev","age":200,"role":"user",
-		"email":"alice@example.com","password":"correct-horse"}`)
-	post("not json:", `<html>`)
+	post("age:", "", badAge)
+	post("age zh:", "zh-CN", badAge)
+	post("not json:", "", `<html>`)
 
 	// Output:
 	// valid:      201 application/json | {"username":"alice_dev"}
 	// age:        422 application/json | {"details":[{"code":"E1R01","field":"age","message":"age must be \u003c=150"}],"error":"validation_failed"}
+	// age zh:     422 application/json | {"details":[{"code":"E1R01","field":"age","message":"age必须满足 \u003c=150"}],"error":"validation_failed"}
 	// not json:   400 application/json | {"error":"malformed_json"}
 }
 

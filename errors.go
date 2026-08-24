@@ -36,6 +36,19 @@ const (
 	CodeConfigError ErrorCode = "E0C01" // invalid configuration (e.g. undefined FailMode)
 )
 
+// builtinErrorCodes is the closed set declared above, in the same order.
+//
+// Adding a code without adding it here makes it invisible to Catalog.Validate,
+// which would then report a catalog as complete while that code renders as
+// generic text. Keep the two in step.
+var builtinErrorCodes = []ErrorCode{
+	CodeFormatMismatch, CodeTypeMismatch, CodeEnumInvalid, CodeRangeViolation,
+	CodeRequiredMissing, CodeArrayElement, CodeCUEOther,
+	CodeBizRuleFailed, CodeExprExecError, CodeBlobTypeMismatch,
+	CodeCondRequired, CodeMetaRuntimeError,
+	CodeConfigError,
+}
+
 // ValidationError represents a single validation failure.
 type ValidationError struct {
 	Code ErrorCode `json:"code"` // structured error code
@@ -56,6 +69,42 @@ type ValidationError struct {
 	// confidence. Only enum violations populate it — a range or regex violation
 	// has no meaningful correction to guess, and inventing one would mislead.
 	Suggestion string `json:"suggestion,omitempty"`
+
+	// EnumOptions lists every value the schema accepts, in declaration order.
+	// Only enum violations populate it.
+	//
+	// Values are unquoted: "CNY", not "\"CNY\"". Message renders string
+	// candidates quoted and numeric ones bare, but that is a rendering decision,
+	// and baking it into the data would force every consumer — a form's dropdown,
+	// a translation layer — to strip the quotes back off.
+	EnumOptions []string `json:"enum_options,omitempty"`
+
+	// Bound is the comparison the value failed, such as "<=150" or ">0". Only
+	// range violations populate it, and only the side that was actually broken:
+	// a value above the maximum of `>=0 & <=150` reports "<=150".
+	Bound string `json:"bound,omitempty"`
+}
+
+// attachStructuredFields lifts the data needed to rebuild a message out of the
+// descriptor and the raw detail text.
+//
+// It must run before formatMessage. A custom ErrorFormatter replaces Message
+// with arbitrary text, so anything recovered from Message afterwards would
+// disappear the moment a formatter is configured — which is exactly the
+// fragility these fields exist to remove.
+//
+// fc may be nil. A struct field, or a scalar the descriptor declined to decide,
+// has no fastConstraint; Bound is still recoverable from the detail text, while
+// EnumOptions is filled by the CUE path itself (see collapseDisjunctionErrors).
+func attachStructuredFields(e *ValidationError, fc *fastConstraint, detail string) {
+	switch e.Code {
+	case CodeEnumInvalid:
+		if e.EnumOptions == nil {
+			e.EnumOptions = enumOptionsOf(fc)
+		}
+	case CodeRangeViolation:
+		e.Bound = boundFromDetail(detail)
+	}
 }
 
 // Error implements the error interface for ValidationError.
@@ -63,107 +112,26 @@ func (e ValidationError) Error() string {
 	return fmt.Sprintf("[%s] %s: %s", e.Code, e.Path, e.Message)
 }
 
-// FriendlyMessage renders a user-facing sentence for the error.
-//
-// Message and FriendlyMessage are both always available, which is deliberate:
-// a service typically logs the raw diagnostic and renders the friendly one, and
-// needing both at once is the common case rather than a mode to switch between.
-//
-//	log.Warn(e.Message)              // raw CUE/Bloblang wording
-//	json.Encode(e.FriendlyMessage()) // user-facing text
-//
-// A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
-// from the structured fields (Code, Path, FieldType, Suggestion) and therefore
-// stays stable regardless of formatter configuration.
-func (e ValidationError) FriendlyMessage() string {
-	field := e.Path
-	if field == "" {
-		field = "value"
-	}
-
-	switch e.Code {
-	case CodeRequiredMissing:
-		return fmt.Sprintf("%s is required", field)
-
-	case CodeCondRequired:
-		return fmt.Sprintf("%s is required for this request", field)
-
-	case CodeTypeMismatch:
-		if e.FieldType != "" {
-			return fmt.Sprintf("%s must be of type %s", field, e.FieldType)
-		}
-		return fmt.Sprintf("%s has the wrong type", field)
-
-	case CodeEnumInvalid:
-		msg := fmt.Sprintf("%s is not one of the allowed values", field)
-		if opts := enumOptionsFromDetail(e.Message); opts != "" {
-			msg = fmt.Sprintf("%s must be one of %s", field, opts)
-		}
-		if e.Suggestion != "" {
-			msg += fmt.Sprintf(" — did you mean %q?", e.Suggestion)
-		}
-		return msg
-
-	case CodeRangeViolation:
-		if bound := boundFromDetail(e.Message); bound != "" {
-			return fmt.Sprintf("%s must be %s", field, bound)
-		}
-		return fmt.Sprintf("%s is out of the allowed range", field)
-
-	case CodeFormatMismatch:
-		return fmt.Sprintf("%s has an invalid format", field)
-
-	case CodeArrayElement:
-		return fmt.Sprintf("%s contains an invalid item", field)
-
-	case CodeBizRuleFailed:
-		return fmt.Sprintf("%s does not satisfy a validation rule", field)
-
-	case CodeBlobTypeMismatch:
-		return fmt.Sprintf("%s produced a value of the wrong type", field)
-
-	case CodeExprExecError, CodeMetaRuntimeError:
-		return fmt.Sprintf("%s could not be evaluated", field)
-
-	case CodeConfigError:
-		return "the validation configuration is invalid"
-
-	case CodeCUEOther:
-		return fmt.Sprintf("%s is invalid", field)
-	}
-
-	// Unknown code — never return empty, so a UI can call this unconditionally.
-	return fmt.Sprintf("%s is invalid", field)
-}
-
-// enumOptionsFromDetail lifts the candidate list out of an enum detail such as
-// `value "USE" not in enum ["CNY", "USD"]`, returning `["CNY", "USD"]`.
-func enumOptionsFromDetail(detail string) string {
-	open := strings.LastIndex(detail, "[")
-	if open < 0 || !strings.HasSuffix(detail, "]") {
-		return ""
-	}
-	return detail[open:]
-}
-
-// boundFromDetail lifts the comparison out of a range detail such as
-// `value 999 out of bound <=150`, returning `<=150`.
-func boundFromDetail(detail string) string {
-	const marker = "out of bound "
-	i := strings.Index(detail, marker)
-	if i < 0 {
-		return ""
-	}
-	return strings.TrimSpace(detail[i+len(marker):])
-}
-
-// maxSuggestionDistance caps how far a value may be from a candidate before the
-
 // Result holds the output of a Process call.
 type Result struct {
 	Valid  bool              `json:"valid"`
 	Errors []ValidationError `json:"errors"`
 	Output map[string]any    `json:"output"`
+
+	// v is the Validator that produced this result, read by LocalizedMessages to
+	// find the Localizer configured with WithLocalizer. Nil when the result did
+	// not come from one.
+	//
+	// A pointer rather than the Localizer interface, because the interface's two
+	// words grew Result from 40 to 56 bytes and cost measurable time on the
+	// allocation-free scalar path — a result is returned by value from every
+	// Process and Validate call. See TestResultSizeUnchanged.
+	//
+	// The default cannot live on ValidationError instead: that type is a DTO with
+	// a json tag on every field, so it would reach API responses and add two
+	// words to every error in the slice. Unexported keeps it out of this struct's
+	// JSON too — see TestResultJSONExcludesLocalizer.
+	v *Validator
 }
 
 // Err returns nil if validation passed, or a combined error from all
@@ -242,7 +210,14 @@ func (r Result) HasErrorsAt(path string) bool {
 	return false
 }
 
-// ErrorMessages returns all error messages joined by newline.
+// ErrorMessages returns the raw diagnostics, one per line.
+//
+// Each line carries the error code and the CUE/Bloblang wording, which makes
+// this the string for a log, not for a response body. LocalizedMessages is the
+// user-facing counterpart:
+//
+//	log.Warn(r.ErrorMessages())    // [E1R01] age: value 200 out of bound <=150
+//	r.LocalizedMessages()          // ["age must be <=150"]
 func (r Result) ErrorMessages() string {
 	if len(r.Errors) == 0 {
 		return ""
@@ -253,18 +228,6 @@ func (r Result) ErrorMessages() string {
 	}
 	return strings.Join(msgs, "\n")
 }
-
-// ErrorFormatter customizes the human-readable message in ValidationError.
-// It receives the error code, field path, and the default detail message
-// (which is the raw CUE error or expression text). Return the desired
-// user-facing message string.
-//
-// Example (i18n):
-//
-//	func myFormatter(code ErrorCode, path, detail string) string {
-//	    return i18n.T("zh-CN", string(code), path)
-//	}
-type ErrorFormatter func(code ErrorCode, path string, detail string) string
 
 // Validation error type identifiers (user-facing, for filtering ValidationError.Type).
 const (

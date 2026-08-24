@@ -159,3 +159,53 @@ func TestValidModeBloblangMapping(t *testing.T) {
 // =============================================================================
 // Fast path tests (three-state, precision, types, arrays)
 // =============================================================================
+
+// TestFailFastStopsWalkingFields pins that FailFast stops visiting fields at the
+// first failure rather than collecting every error and truncating to one. The
+// two are indistinguishable from Result — both yield exactly one error — so the
+// evidence has to come from elsewhere: ObserveFastpathDecision fires once per
+// field carrying a fast descriptor, so its call count reveals how far the walk
+// got.
+//
+// FailAll is asserted alongside as the control. Without it, an early return
+// leaking into the other modes would silently drop errors and this test would
+// still pass.
+func TestFailFastStopsWalkingFields(t *testing.T) {
+	const schema = `{
+		a: int & >=0
+		b: int & >=0
+		c: int & >=0
+	}`
+	data := map[string]any{"a": int64(-1), "b": int64(-2), "c": int64(-3)}
+
+	tests := []struct {
+		mode          FailMode
+		wantErrors    int
+		wantFieldsHit int
+	}{
+		{FailFast, 1, 1},
+		{FailAll, 3, 3},
+	}
+
+	for _, tc := range tests {
+		t.Run(failModeString(tc.mode), func(t *testing.T) {
+			rec := &fakeRecorder{}
+			v, err := New(schema, WithMetricsRecorder(rec))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			r := v.ProcessWithMode(data, tc.mode)
+			if r.Valid {
+				t.Fatal("expected an invalid result")
+			}
+			if got := len(r.Errors); got != tc.wantErrors {
+				t.Errorf("errors = %d, want %d", got, tc.wantErrors)
+			}
+			if got := len(rec.fastpathCalls); got != tc.wantFieldsHit {
+				t.Errorf("fields visited = %d, want %d — FailFast must not walk past the first failure",
+					got, tc.wantFieldsHit)
+			}
+		})
+	}
+}

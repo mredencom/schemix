@@ -75,6 +75,10 @@ graph TD
     - [FuncMap（可复用集合）](#funcmap可复用集合)
     - [覆盖内置校验方法](#覆盖内置校验方法)
   - [错误处理](#错误处理)
+  - [本地化](#本地化)
+    - [覆盖部分消息](#覆盖部分消息)
+    - [接入已有的 i18n 体系](#接入已有的-i18n-体系)
+    - [两件它不会改变的事](#两件它不会改变的事)
   - [自定义错误消息](#自定义错误消息)
   - [Schema 组合](#schema-组合)
   - [Schema 自省](#schema-自省)
@@ -103,7 +107,8 @@ graph TD
 | **执行策略** | 三种 FailMode —— 收集所有 / 首个即停 / 优先级组隔离 |
 | **性能** | 预编译描述符；纯标量 schema **382 ns 完成校验且零分配** —— `cue.Context.Encode` 被完全跳过 |
 | **可观测性** | `MetricsRecorder` 钩子 + OpenTelemetry 追踪；开箱可用的 `schemixprom` / `schemixotel` recorder |
-| **错误处理** | 结构化错误码、链式 API（HasCode/ErrorsByCode/ErrorsByType）、自定义 i18n 格式化 |
+| **错误处理** | 结构化错误码、链式 API（HasCode/ErrorsByCode/ErrorsByType） |
+| **本地化** | `Localizer` 接口 + 内置 `EnUS` / `ZhCN` 目录；支持按请求选择语言 |
 | **组合复用** | CUE definitions + `NewFromValue` 实现 schema 复用，运行时自省 |
 | **集成** | Method & Function 形式接入 Benthos/Redpanda Connect 管道 |
 | **线程安全** | Validator 构造后只读；Registry 使用 RWMutex |
@@ -262,15 +267,17 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
             return
         }
 
+        // 按请求本地化，而不是按 validator —— 一份编译好的 schema 服务所有语言。
+        // e.Message 里是 CUE/Bloblang 原文，记日志用，不要返回给调用方。
+        loc := catalogFor(req.Header.Get("Accept-Language"))
         details := make([]map[string]string, len(r.Errors))
         for i, e := range r.Errors {
             details[i] = map[string]string{
-                "field": e.Path,
-                "code":  string(e.Code),
-                // FriendlyMessage() 是面向用户的措辞；e.Message 是 CUE/Bloblang
-                // 的原始诊断 —— 写进日志，不要返回给调用方。
-                "message": e.FriendlyMessage(),
+                "field":   e.Path,
+                "code":    string(e.Code),
+                "message": loc.Localize(e),
             }
+        }
         }
         respond(w, http.StatusUnprocessableEntity, map[string]any{
             "error":   "validation_failed",
@@ -288,6 +295,15 @@ func respond(w http.ResponseWriter, status int, body any) {
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(status)
     _ = json.NewEncoder(w).Encode(body)
+}
+
+// catalogFor 把请求映射到语言。返回接口而不是 *schemix.Catalog，
+// 是为了将来能换成自己的 i18n 体系而不必改动 handler。
+func catalogFor(header string) schemix.Localizer {
+    if strings.HasPrefix(header, "zh") {
+        return schemix.ZhCN
+    }
+    return schemix.EnUS
 }
 ```
 
@@ -519,9 +535,27 @@ v, _ := schemix.New(schema, schemix.WithOverrideAll(), schemix.WithFuncMap(myFun
 
 ## 错误处理
 
-```go
-r := v.Process(data)
+错误面向三类读者，把它们混起来是最常见的错误 —— `Message` 里是 CUE 原文，
+不应该出现在给调用方的响应里。
 
+**给人看** —— 已本地化，可直接返回：
+
+```go
+r.LocalizedMessages()                // []string，使用配置的语言
+r.LocalizedMessagesWith(loc)         // []string，按请求选择语言
+loc.Localize(e)                      // 单条错误
+```
+
+**给日志看** —— 原始诊断信息：
+
+```go
+r.ErrorMessages()                    // 每行一条，带错误码
+e.Message                            // 单条错误的诊断信息
+```
+
+**给代码看** —— 用于分支判断的结构化字段：
+
+```go
 r.Valid                              // bool
 r.Err()                              // 合并后的 error（合法时为 nil）
 r.FirstError()                       // *ValidationError
@@ -529,8 +563,7 @@ r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
 r.ErrorsByType("cue")                // []ValidationError —— 按层过滤
 r.HasCode(schemix.CodeBizRuleFailed) // bool —— 快速分类判断
-r.HasErrorsAt("email")              // bool —— 字段级判断
-r.ErrorMessages()                    // 换行拼接的字符串
+r.HasErrorsAt("email")               // bool —— 字段级判断
 ```
 
 每条 `ValidationError` 携带：
@@ -543,6 +576,8 @@ r.ErrorMessages()                    // 换行拼接的字符串
 | `FieldType` | 字段的 schema 类型 —— `string`、`int`、`list`…（不适用时为空） |
 | `Message` | 原始诊断信息：CUE/Bloblang 原文，用于日志 |
 | `Suggestion` | 最接近的合法值 —— **仅枚举违规填充** |
+| `EnumOptions` | 全部可接受的值，不带引号 —— **仅枚举违规填充** |
+| `Bound` | 未满足的比较式，如 `<=150` —— **仅范围违规填充** |
 
 枚举错误会列出所有可接受的值，并给出最接近的建议：
 
@@ -557,30 +592,129 @@ r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] �
 > `Suggestion` 只对枚举填充。范围或正则违规没有可以合理猜测的值，
 > 硬造只会误导 —— 边界信息本来就在 message 里（`value 999 out of bound <=150`）。
 
-## 自定义错误消息
+## 本地化
 
-`Message` 与 `FriendlyMessage()` 始终同时可用，无需模式开关即可覆盖两类读者：
+只服务一种语言时，在构造时设定一次：
 
 ```go
-log.Warn(e.Message)                    // 原始：age: conflicting values "old" and int
-render(e.FriendlyMessage())            // 面向用户：age must be of type int
+v := schemix.MustNew(schema, schemix.WithLocalizer(schemix.ZhCN))
+
+r := v.Process(map[string]any{"age": int64(200), "currency": "USE"})
+r.LocalizedMessages()
+// ["age必须满足 <=150", `currency必须是 ["CNY", "USD"] 中的一个，您是否想输入 "USD"？`]
 ```
 
-`FriendlyMessage()` 由结构化字段（`Code`、`Path`、`FieldType`、`Suggestion`）推导而来，
-永不返回空字符串，并且不会把 CUE 内部术语暴露给最终用户。
+需要多语言时按请求选择。**同一个 validator 可并发服务所有语言** —— 语言不会
+在构造期被固定：
 
-需要 i18n 或完全控制时，提供 `ErrorFormatter` —— 它会替换 `Message`：
+```go
+func handle(w http.ResponseWriter, req *http.Request) {
+    r := userSchema.ProcessValue(body)
+    if !r.Valid {
+        msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
+        respond(w, 422, map[string]any{"errors": msgs})
+    }
+}
+```
+
+`EnUS` 与 `ZhCN` 为内置目录。
+
+### 覆盖部分消息
+
+用 `Fallback` 链接到内置目录，而不是复制整张表 —— 复制出来的表在内置文案
+调整后会悄悄过期：
+
+```go
+var forms = &schemix.Catalog{
+    Messages: map[schemix.ErrorCode]schemix.Message{
+        schemix.CodeRequiredMissing: {Template: "请填写{field}。"},
+        schemix.CodeRangeViolation: {
+            Template: "{field}必须满足 {bound}。",
+            Fallback: "{field}超出允许的范围。",   // 没有可报告的边界时
+        },
+    },
+    Labels: map[string]string{
+        "contact_email": "邮箱地址",
+        "items[].price": "单价",   // 覆盖所有元素
+    },
+    Fallback: schemix.ZhCN,
+}
+
+func init() {
+    if err := forms.Validate(); err != nil {   // 在启动期做这件事
+        log.Fatalf("消息目录有问题: %v", err)
+    }
+}
+```
+
+| 占位符 | 取值 |
+|--------|------|
+| `{field}` | `Labels[path]`，没有则用路径本身 |
+| `{type}` | schema 类型 —— `int`、`string`… |
+| `{options}` | 可接受的值 —— `["CNY", "USD"]` |
+| `{bound}` | 未满足的比较式 —— `<=150` |
+| `{suggestion}` | 最接近的合法值，带引号 |
+
+> **`Message.Fallback` 不是可选的冗余。** 当值因为是 `±Inf` 被拒绝时，
+> 并不存在被违反的声明边界，此时含 `{bound}` 的模板无值可填 —— 没有 fallback
+> 就会渲染出「金额必须满足」这样的残句。`Catalog.Validate()` 会报告缺少
+> fallback 的模板，以及未覆盖的错误码、未知占位符和 fallback 环。
+> 它不会被自动调用：未覆盖的错误码只会降级为泛泛措辞而不会报错，
+> 所以启动期是唯一便宜的发现时机。
+
+> 有意不提供 `{value}` 占位符。被拒绝的值可能是密码或卡号，
+> 而这些字符串会进入 API 响应和日志。
+
+### 接入已有的 i18n 体系
+
+`Localizer` 是接口，翻译资源可以留在它们原本的位置：
+
+```go
+type myLocalizer struct{ lang string }
+
+func (m myLocalizer) Localize(e schemix.ValidationError) string {
+    // NormalizePath 把 items[3].price 归一化为 items[].price
+    return i18n.T(m.lang, string(e.Code), schemix.NormalizePath(e.Path), e.EnumOptions)
+}
+
+v := schemix.MustNew(schema, schemix.WithLocalizer(myLocalizer{lang: "fr"}))
+```
+
+实现必须：永不返回空字符串（调用方会无条件渲染）、不包含被拒绝的值、
+保持纯函数（同一条错误要能同时渲染成两种语言）。
+
+### 两件它不会改变的事
+
+`ValidationError.FriendlyMessage()` **始终是英文**。错误本身不携带 locale，
+给它加上 locale 等于把翻译决策塞进一个会被序列化进 API 响应的结构体。
+它仍然适合写日志、以及单语言服务；其他场景请用 `LocalizedMessages()`。
+
+`Validate` 系列方法**没有默认语言**，因为它返回 `(bool, []ValidationError)`，
+没有 `Result` 来承载默认值。这条路径上请显式本地化：
+
+```go
+valid, errs := v.Validate(data)
+for _, e := range errs {
+    render(schemix.ZhCN.Localize(e))
+}
+```
+
+## 自定义错误消息
+
+`ErrorFormatter` 改写的是 `Message` —— 面向日志的诊断信息，适合用来统一日志格式：
 
 ```go
 v := schemix.MustNew(schema, schemix.WithErrorFormatter(
     func(code schemix.ErrorCode, path, detail string) string {
-        return i18n.T("zh-CN", string(code), path)
+        return fmt.Sprintf("[%s] %s: %s", code, path, detail)
     },
 ))
 ```
 
-formatter 接收错误码、字段路径和默认详情消息。
-未设置 formatter 时，`Message` 携带 CUE/Bloblang 原文。
+它**不是**做翻译的手段：它只能看到三个字符串而不是完整的错误，
+因此无法列出枚举的可接受值、也无法说出数值违反了哪个边界，
+同时还会覆盖开发者调试时需要的原文。两个钩子互相独立、可同时设置 ——
+formatter 负责 `Message`，localizer 负责人读到的文本。
 
 ## Schema 组合
 
@@ -751,10 +885,14 @@ v, _ := schemix.New(schema,
 | `ObserveLayerDuration(layer, d, schemaName)` | 每层一次 —— `cue`、`blob` |
 | `ObserveErrorCode(code, schemaName)` | 每条校验错误一次 |
 | `ObserveBlobExecution(path, d, success)` | 每次 `@blob` 规则执行一次 |
-| `ObserveFastpathDecision(path, hit)` | 每个持有 fast 约束的字段一次 |
+| `ObserveFastpathDecision(path, hit)` | 每个持有 fast 约束的字段一次 —— 见下方说明 |
 
 > 实现必须并发安全且非阻塞 —— 它们在每次调用中同步执行。
 > 请异步缓冲批量上报，不要在其中做网络 I/O。
+
+> **`FailFast` 上报的 fastpath 决策更少。** 字段遍历在第一个失败处结束，因此
+> `ObserveFastpathDecision` 只对实际访问到的字段触发。用这些调用次数推断 schema
+> 的字段数在 `FailAll` 与 `FailPriority` 下成立，在 `FailFast` 下不成立。
 
 ### 开箱可用的 recorder
 
@@ -803,8 +941,14 @@ v := schemix.MustNew(cueSrc)                    // 出错 panic
 v, _ := schemix.NewWithContext(ctx, src)         // 共享 CUE context
 v, _ := schemix.NewFromValue(cueValue)           // 从预编译 CUE Value
 
+// 选项 — 本地化
+schemix.WithLocalizer(schemix.ZhCN)              // LocalizedMessages 的默认语言
+schemix.EnUS, schemix.ZhCN                       // 内置目录
+schemix.NormalizePath("items[0].price")          // "items[].price" —— 用于 Labels 查找
+catalog.Validate()                               // 启动期报告缺口
+
 // 选项 — 自定义函数
-schemix.WithErrorFormatter(fn)                   // 自定义错误消息
+schemix.WithErrorFormatter(fn)                   // 改写 Message（面向日志）
 schemix.WithFunction(name, ctor)                 // 自定义函数（V1）
 schemix.WithFunctionV2(name, spec, ctor)         // 自定义函数（V2）
 schemix.WithMethod(name, fn)                     // 自定义方法（V1）

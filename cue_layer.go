@@ -59,8 +59,20 @@ func (l *lazyCUEValue) value() cue.Value {
 // a measured 4.5% on the scalar path — enough to trip the benchmark gate. Only
 // the branches that report a problem, or that need CUE, are functions: those run
 // rarely enough that a call is free.
-func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, rawData map[string]any, result *Result) {
+//
+// stopEarly is set under FailFast, where the walk ends at the first failure.
+// A side effect worth stating: ObserveFastpathDecision then reports only the
+// fields actually visited, which is fewer than the schema holds. That is the
+// point — the remaining work is not done, so it is not reported.
+func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, rawData map[string]any, result *Result, stopEarly bool) {
 	for i := range fields {
+		// FailFast keeps only the first error, so walking the remaining fields
+		// buys nothing — it formats a Message and copies enum candidates for
+		// errors that the truncation in processInternal then throws away.
+		if stopEarly && !result.Valid {
+			return
+		}
+
 		f := &fields[i]
 
 		goVal, exists := rawData[f.name]
@@ -82,7 +94,7 @@ func (v *Validator) validateCUEFields(fields []cueField, data *lazyCUEValue, raw
 		if f.fast != nil && v.checkFast(f, goVal, result) {
 			continue
 		}
-		v.validateViaCUE(f, data, goVal, result)
+		v.validateViaCUE(f, data, goVal, result, stopEarly)
 	}
 }
 
@@ -102,7 +114,7 @@ func (v *Validator) recordNonNullableNil(f *cueField, result *Result) {
 // validateViaCUE is the slow path, reached only for fields no descriptor could
 // decide. Reading the field forces the lazy encode, so everything that could be
 // answered without a cue.Value has already been answered.
-func (v *Validator) validateViaCUE(f *cueField, data *lazyCUEValue, goVal any, result *Result) {
+func (v *Validator) validateViaCUE(f *cueField, data *lazyCUEValue, goVal any, result *Result, stopEarly bool) {
 	fieldData := data.value().LookupPath(f.cuePath)
 	if !fieldData.Exists() {
 		return
@@ -110,7 +122,7 @@ func (v *Validator) validateViaCUE(f *cueField, data *lazyCUEValue, goVal any, r
 
 	switch {
 	case f.isStruct:
-		v.validateStructField(f, fieldData, goVal, result)
+		v.validateStructField(f, fieldData, goVal, result, stopEarly)
 	case f.isList:
 		v.validateListField(f, fieldData, goVal, result)
 	default:
@@ -120,7 +132,7 @@ func (v *Validator) validateViaCUE(f *cueField, data *lazyCUEValue, goVal any, r
 
 // validateStructField recurses into a nested struct's own descriptors, which is
 // what keeps its scalar leaves on the fast path.
-func (v *Validator) validateStructField(f *cueField, fieldData cue.Value, goVal any, result *Result) {
+func (v *Validator) validateStructField(f *cueField, fieldData cue.Value, goVal any, result *Result, stopEarly bool) {
 	if fieldData.IncompleteKind() != cue.StructKind {
 		v.recordFieldError(result, f, CodeTypeMismatch, f.path,
 			fmt.Sprintf("field %q expects struct, got %T", f.path, goVal))
@@ -131,7 +143,7 @@ func (v *Validator) validateStructField(f *cueField, fieldData cue.Value, goVal 
 	if nestedRaw == nil || len(f.children) == 0 {
 		return
 	}
-	v.validateCUEFields(f.children, encodedCUEValue(fieldData), nestedRaw, result)
+	v.validateCUEFields(f.children, encodedCUEValue(fieldData), nestedRaw, result, stopEarly)
 }
 
 // validateListField handles the lists no element descriptor covers — struct
@@ -174,6 +186,9 @@ func (v *Validator) listErrors(f *cueField, err error) []ValidationError {
 	// error per offending field.
 	collected = collapseDisjunctionErrors(collected)
 	for i := range collected {
+		// Message still holds the raw CUE text at this point; lift what a
+		// localizer needs before a formatter is given the chance to replace it.
+		attachStructuredFields(&collected[i], nil, collected[i].Message)
 		collected[i].Message = v.formatMessage(
 			collected[i].Code, collected[i].Path, collected[i].Message)
 	}
@@ -199,13 +214,15 @@ func (v *Validator) validateScalarField(f *cueField, fieldData cue.Value, result
 // their own because they also carry a Suggestion.
 func (v *Validator) recordFieldError(result *Result, f *cueField, code ErrorCode, path, detail string) {
 	result.Valid = false
-	result.Errors = append(result.Errors, ValidationError{
+	e := ValidationError{
 		Code:      code,
 		Path:      path,
 		Type:      TypeCUE,
-		Message:   v.formatMessage(code, path, detail),
 		FieldType: f.fieldType,
-	})
+	}
+	attachStructuredFields(&e, f.fast, detail)
+	e.Message = v.formatMessage(code, path, detail)
+	result.Errors = append(result.Errors, e)
 }
 
 // checkFast runs the Go-native descriptor for one field and records any
@@ -228,14 +245,16 @@ func (v *Validator) checkFast(f *cueField, goVal any, result *Result) bool {
 	}
 	if !fr.Valid {
 		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
+		e := ValidationError{
 			Code:       fr.Code,
 			Path:       f.path,
 			Type:       TypeCUE,
-			Message:    v.formatMessage(fr.Code, f.path, fr.Detail),
 			FieldType:  f.fieldType,
 			Suggestion: fr.Suggestion,
-		})
+		}
+		attachStructuredFields(&e, f.fast, fr.Detail)
+		e.Message = v.formatMessage(fr.Code, f.path, fr.Detail)
+		result.Errors = append(result.Errors, e)
 	}
 	return true
 }
@@ -254,14 +273,17 @@ func (v *Validator) checkFastList(f *cueField, goVal any, result *Result) bool {
 		result.Valid = false
 		for _, ef := range failures {
 			ePath := indexedPath(f.path, ef.Index)
-			result.Errors = append(result.Errors, ValidationError{
+			e := ValidationError{
 				Code:       ef.Code,
 				Path:       ePath,
 				Type:       TypeCUE,
-				Message:    v.formatMessage(ef.Code, ePath, ef.Detail),
 				FieldType:  f.fieldType,
 				Suggestion: ef.Suggestion,
-			})
+			}
+			// Candidates live on the element descriptor, not the list's own.
+			attachStructuredFields(&e, f.fast.elem, ef.Detail)
+			e.Message = v.formatMessage(ef.Code, ePath, ef.Detail)
+			result.Errors = append(result.Errors, e)
 		}
 	}
 	return true

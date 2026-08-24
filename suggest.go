@@ -5,10 +5,13 @@ import (
 	"unicode/utf8"
 )
 
+// maxSuggestionDistance caps how far a value may be from a candidate before the
 // suggestion is dropped. Guessing past this point produces noise rather than
 // help, so no suggestion is preferable.
 const maxSuggestionDistance = 2
 
+// suggestClosest returns the candidate nearest to value, or "" when none is
+// close enough to be a confident correction. Comparison is case-insensitive so
 // that "usd" suggests "USD".
 func suggestClosest(value string, candidates []string) string {
 	if value == "" || len(candidates) == 0 {

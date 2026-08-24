@@ -76,6 +76,10 @@ graph TD
     - [FuncMap (Reusable Collections)](#funcmap-reusable-collections)
     - [Overriding Built-in Validators](#overriding-built-in-validators)
   - [Error Handling](#error-handling)
+  - [Localization](#localization)
+    - [Overriding messages](#overriding-messages)
+    - [Using an existing i18n pipeline](#using-an-existing-i18n-pipeline)
+    - [Two things it does not change](#two-things-it-does-not-change)
   - [Custom Error Messages](#custom-error-messages)
   - [Schema Composition](#schema-composition)
   - [Schema Introspection](#schema-introspection)
@@ -104,7 +108,8 @@ graph TD
 | **Execution** | Three FailModes — collect all / stop at first / priority-group isolation |
 | **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations** — `cue.Context.Encode` is skipped entirely |
 | **Observability** | `MetricsRecorder` hooks + OpenTelemetry tracing; ready-made `schemixprom` / `schemixotel` recorders |
-| **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType), custom i18n formatter |
+| **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType) |
+| **Localization** | `Localizer` interface + built-in `EnUS` / `ZhCN` catalogs; per-request language selection |
 | **Composition** | Schema reuse via CUE definitions + `NewFromValue`, runtime introspection |
 | **Integration** | Method & function forms for Benthos/Redpanda Connect pipelines |
 | **Thread Safety** | Validator immutable after construction; Registry uses RWMutex |
@@ -263,14 +268,16 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
             return
         }
 
+        // Localize per request rather than per validator, so one compiled
+        // schema serves every language. e.Message holds raw CUE/Bloblang
+        // wording — log it, don't return it.
+        loc := catalogFor(req.Header.Get("Accept-Language"))
         details := make([]map[string]string, len(r.Errors))
         for i, e := range r.Errors {
             details[i] = map[string]string{
-                "field": e.Path,
-                "code":  string(e.Code),
-                // FriendlyMessage() is the user-facing sentence. e.Message holds
-                // raw CUE/Bloblang wording — log it, don't return it.
-                "message": e.FriendlyMessage(),
+                "field":   e.Path,
+                "code":    string(e.Code),
+                "message": loc.Localize(e),
             }
         }
         respond(w, http.StatusUnprocessableEntity, map[string]any{
@@ -289,6 +296,16 @@ func respond(w http.ResponseWriter, status int, body any) {
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(status)
     _ = json.NewEncoder(w).Encode(body)
+}
+
+// catalogFor maps a request to a language. Returning the interface rather than
+// *schemix.Catalog is what lets you swap in your own i18n pipeline later without
+// touching the handler.
+func catalogFor(header string) schemix.Localizer {
+    if strings.HasPrefix(header, "zh") {
+        return schemix.ZhCN
+    }
+    return schemix.EnUS
 }
 ```
 
@@ -532,9 +549,27 @@ v, _ := schemix.New(schema, schemix.WithOverrideAll(), schemix.WithFuncMap(myFun
 
 ## Error Handling
 
-```go
-r := v.Process(data)
+Errors serve three audiences, and mixing them up is the usual mistake — `Message`
+holds raw CUE wording that should never reach a caller.
 
+**For a person** — localized, ready to return:
+
+```go
+r.LocalizedMessages()                // []string, in the configured language
+r.LocalizedMessagesWith(loc)         // []string, in a language chosen per request
+loc.Localize(e)                      // one error
+```
+
+**For a log** — the raw diagnostic:
+
+```go
+r.ErrorMessages()                    // one per line, with error codes
+e.Message                            // the diagnostic for one error
+```
+
+**For code** — structured fields to branch on:
+
+```go
 r.Valid                              // bool
 r.Err()                              // combined error (nil if valid)
 r.FirstError()                       // *ValidationError
@@ -542,8 +577,7 @@ r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
 r.ErrorsByType("cue")                // []ValidationError — filter by layer
 r.HasCode(schemix.CodeBizRuleFailed) // bool — quick category check
-r.HasErrorsAt("email")              // bool — field-level check
-r.ErrorMessages()                    // newline-joined string
+r.HasErrorsAt("email")               // bool — field-level check
 ```
 
 Each `ValidationError` carries:
@@ -556,6 +590,8 @@ Each `ValidationError` carries:
 | `FieldType` | Schema type of the field — `string`, `int`, `list`… (empty when not applicable) |
 | `Message` | Raw diagnostic: CUE/Bloblang wording, for logs |
 | `Suggestion` | Closest valid value — **enum violations only** |
+| `EnumOptions` | Every accepted value, unquoted — **enum violations only** |
+| `Bound` | The comparison that failed, e.g. `<=150` — **range violations only** |
 
 Enum errors name every accepted value and suggest the closest match:
 
@@ -571,32 +607,134 @@ r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] �
 > meaningful value to guess, and inventing one would mislead — the bound is
 > already in the message (`value 999 out of bound <=150`).
 
-## Custom Error Messages
+## Localization
 
-`Message` and `FriendlyMessage()` are both always available, which covers the
-two audiences without a mode switch:
+Set the language once when the service speaks one:
 
 ```go
-log.Warn(e.Message)                    // raw: age: conflicting values "old" and int
-render(e.FriendlyMessage())            // user-facing: age must be of type int
+v := schemix.MustNew(schema, schemix.WithLocalizer(schemix.ZhCN))
+
+r := v.Process(map[string]any{"age": int64(200), "currency": "USE"})
+r.LocalizedMessages()
+// ["age必须满足 <=150", `currency必须是 ["CNY", "USD"] 中的一个，您是否想输入 "USD"？`]
 ```
 
-`FriendlyMessage()` is derived from the structured fields (`Code`, `Path`,
-`FieldType`, `Suggestion`), never returns an empty string, and keeps CUE
-internals out of user-visible text.
+Or choose per request when it speaks several. **One validator serves all of them
+concurrently** — the language is not baked in at construction:
 
-For i18n or full control, provide an `ErrorFormatter` — it replaces `Message`:
+```go
+func handle(w http.ResponseWriter, req *http.Request) {
+    r := userSchema.ProcessValue(body)
+    if !r.Valid {
+        msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
+        respond(w, 422, map[string]any{"errors": msgs})
+    }
+}
+```
+
+`EnUS` and `ZhCN` are built in.
+
+### Overriding messages
+
+Chain to a built-in catalog rather than copying its table — a copy silently goes
+stale when a built-in message is reworded:
+
+```go
+var forms = &schemix.Catalog{
+    Messages: map[schemix.ErrorCode]schemix.Message{
+        schemix.CodeRequiredMissing: {Template: "Please provide {field}."},
+        schemix.CodeRangeViolation: {
+            Template: "{field} must be {bound}.",
+            Fallback: "{field} is out of range.",   // when no bound was broken
+        },
+    },
+    Labels: map[string]string{
+        "contact_email": "Your email address",
+        "items[].price": "Item price",   // covers every element
+    },
+    Fallback: schemix.EnUS,
+}
+
+func init() {
+    if err := forms.Validate(); err != nil {   // do this at startup
+        log.Fatalf("message catalog: %v", err)
+    }
+}
+```
+
+| Placeholder | Value |
+|-------------|-------|
+| `{field}` | `Labels[path]`, else the path itself |
+| `{type}` | Schema type — `int`, `string`… |
+| `{options}` | Accepted values — `["CNY", "USD"]` |
+| `{bound}` | Failed comparison — `<=150` |
+| `{suggestion}` | Closest valid value, quoted |
+
+> **`Message.Fallback` is not optional padding.** A template naming `{bound}`
+> has nothing to render when a value is rejected as `±Inf`, where no declared
+> bound was broken — without a fallback the sentence trails off as
+> "amount must be". `Catalog.Validate()` reports templates missing one, along
+> with uncovered codes, unknown placeholders, and fallback cycles. Nothing calls
+> it for you: an uncovered code degrades to generic wording rather than failing,
+> so startup is the only cheap place to find out.
+
+> There is deliberately no `{value}` placeholder. The rejected value may be a
+> password or a card number, and these strings reach API responses and logs.
+
+### Using an existing i18n pipeline
+
+`Localizer` is an interface, so translations can stay wherever they already live:
+
+```go
+type myLocalizer struct{ lang string }
+
+func (m myLocalizer) Localize(e schemix.ValidationError) string {
+    // NormalizePath collapses items[3].price to items[].price
+    return i18n.T(m.lang, string(e.Code), schemix.NormalizePath(e.Path), e.EnumOptions)
+}
+
+v := schemix.MustNew(schema, schemix.WithLocalizer(myLocalizer{lang: "fr"}))
+```
+
+An implementation must never return an empty string (callers render it
+unconditionally), must not include the offending value, and must stay pure so
+the same error can be rendered in two languages at once.
+
+### Two things it does not change
+
+`ValidationError.FriendlyMessage()` is **always English**. An error carries no
+locale, and giving it one would put a translation decision inside a struct that
+gets serialised into API responses. It remains the right choice for a log line
+and for a single-language service; use `LocalizedMessages()` otherwise.
+
+The `Validate` family gets **no default language**, because it returns
+`(bool, []ValidationError)` with no `Result` to carry one. Localize explicitly:
+
+```go
+valid, errs := v.Validate(data)
+for _, e := range errs {
+    render(schemix.ZhCN.Localize(e))
+}
+```
+
+## Custom Error Messages
+
+`ErrorFormatter` rewrites `Message`, the diagnostic meant for logs — use it to
+match a log format:
 
 ```go
 v := schemix.MustNew(schema, schemix.WithErrorFormatter(
     func(code schemix.ErrorCode, path, detail string) string {
-        return i18n.T("zh-CN", string(code), path)
+        return fmt.Sprintf("[%s] %s: %s", code, path, detail)
     },
 ))
 ```
 
-The formatter receives the error code, field path, and default detail message.
-With no formatter, `Message` carries the raw CUE/Bloblang text.
+It is **not** the way to translate: it sees three strings rather than the whole
+error, so it cannot name an enum's accepted values or the bound a number broke,
+and it overwrites the text a developer needs while debugging. The two hooks are
+independent and can be set together — the formatter owns `Message`, the localizer
+owns what a person reads.
 
 ## Schema Composition
 
@@ -769,10 +907,15 @@ v, _ := schemix.New(schema,
 | `ObserveLayerDuration(layer, d, schemaName)` | once per layer — `cue`, `blob` |
 | `ObserveErrorCode(code, schemaName)` | once per validation error |
 | `ObserveBlobExecution(path, d, success)` | once per `@blob` rule execution |
-| `ObserveFastpathDecision(path, hit)` | once per field holding a fast constraint |
+| `ObserveFastpathDecision(path, hit)` | once per field holding a fast constraint — see the note below |
 
 > Implementations must be concurrency-safe and non-blocking — they run inline on
 > every call. Buffer and batch asynchronously rather than doing network I/O.
+
+> **`FailFast` reports fewer fastpath decisions.** The field walk ends at the
+> first failure, so `ObserveFastpathDecision` fires only for the fields actually
+> visited. Counting these calls to infer a schema's field count works under
+> `FailAll` and `FailPriority`, not under `FailFast`.
 
 ### Ready-made recorders
 
@@ -821,8 +964,14 @@ v := schemix.MustNew(cueSrc)                    // panic on error
 v, _ := schemix.NewWithContext(ctx, src)         // shared CUE context
 v, _ := schemix.NewFromValue(cueValue)           // from pre-compiled CUE value
 
+// Options — localization
+schemix.WithLocalizer(schemix.ZhCN)              // default language for LocalizedMessages
+schemix.EnUS, schemix.ZhCN                       // built-in catalogs
+schemix.NormalizePath("items[0].price")          // "items[].price" — for label lookup
+catalog.Validate()                               // report gaps at startup
+
 // Options — custom functions
-schemix.WithErrorFormatter(fn)                   // custom error messages
+schemix.WithErrorFormatter(fn)                   // rewrite Message (for logs)
 schemix.WithFunction(name, ctor)                 // custom function (V1)
 schemix.WithFunctionV2(name, spec, ctor)         // custom function (V2)
 schemix.WithMethod(name, fn)                     // custom method (V1)

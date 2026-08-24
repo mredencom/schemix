@@ -2,8 +2,11 @@ package schemix
 
 import (
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestResult_HasCode(t *testing.T) {
@@ -429,3 +432,265 @@ func TestErrorFormatter_NilFormatter(t *testing.T) {
 }
 
 // ========== NewFromValue (Schema Composition) ==========
+
+// --- Structured enum and bound fields ---
+//
+// EnumOptions and Bound lift data the validator already holds at the point of
+// failure into the error itself, so that rendering a message never requires
+// parsing Message. Every case below asserts the structured field, not the
+// wording, because the wording is what these fields exist to decouple from.
+
+func TestValidationErrorEnumOptions(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		data   map[string]any
+		path   string
+		want   []string
+	}{
+		{
+			name:   "fastpath string enum",
+			schema: `{currency: "CNY" | "USD" | "EUR"}`,
+			data:   map[string]any{"currency": "USE"},
+			path:   "currency",
+			want:   []string{"CNY", "USD", "EUR"},
+		},
+		{
+			name:   "fastpath int enum",
+			schema: `{level: 1 | 2 | 3}`,
+			data:   map[string]any{"level": int64(9)},
+			path:   "level",
+			want:   []string{"1", "2", "3"},
+		},
+		{
+			name:   "fastpath float enum",
+			schema: `{rate: 1.5 | 2.5}`,
+			data:   map[string]any{"rate": 9.5},
+			path:   "rate",
+			want:   []string{"1.5", "2.5"},
+		},
+		{
+			name:   "scalar list element",
+			schema: `{tags: [..."a" | "b"]}`,
+			data:   map[string]any{"tags": []any{"a", "zzz"}},
+			path:   "tags[1]",
+			want:   []string{"a", "b"},
+		},
+		{
+			// A struct field has no fast descriptor, so this exercises the CUE
+			// path, where candidates arrive quoted and must be unquoted.
+			name:   "cue path inside struct",
+			schema: `{cfg: {currency: "CNY" | "USD"}}`,
+			data:   map[string]any{"cfg": map[string]any{"currency": "XXX"}},
+			path:   "cfg.currency",
+			want:   []string{"CNY", "USD"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := MustNew(tt.schema).Process(tt.data)
+			if r.Valid {
+				t.Fatal("expected validation to fail")
+			}
+			errs := r.ErrorsByPath(tt.path)
+			if len(errs) == 0 {
+				t.Fatalf("no error at %q; got %v", tt.path, r.Errors)
+			}
+			e := errs[0]
+			if e.Code != CodeEnumInvalid {
+				t.Fatalf("expected %s at %q, got %s (%s)", CodeEnumInvalid, tt.path, e.Code, e.Message)
+			}
+			if !slices.Equal(e.EnumOptions, tt.want) {
+				t.Errorf("EnumOptions = %q, want %q", e.EnumOptions, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidationErrorBound(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		data   map[string]any
+		path   string
+		want   string
+	}{
+		{
+			name:   "fastpath int upper bound",
+			schema: `{age: int & >=13 & <=150}`,
+			data:   map[string]any{"age": int64(200)},
+			path:   "age",
+			want:   "<=150",
+		},
+		{
+			name:   "fastpath int lower bound",
+			schema: `{age: int & >=13 & <=150}`,
+			data:   map[string]any{"age": int64(5)},
+			path:   "age",
+			want:   ">=13",
+		},
+		{
+			name:   "fastpath float exclusive bound",
+			schema: `{amount: float & >0.0}`,
+			data:   map[string]any{"amount": 0.0},
+			path:   "amount",
+			want:   ">0",
+		},
+		{
+			name:   "cue path inside struct",
+			schema: `{cfg: {age: int & <=150}}`,
+			data:   map[string]any{"cfg": map[string]any{"age": int64(200)}},
+			path:   "cfg.age",
+			want:   "<=150",
+		},
+		{
+			// A struct element is the one path that reports CUE's own wording,
+			// which parenthesises the bound: "invalid value -5 (out of bound >0)".
+			// The closing paren is not part of the comparison.
+			name:   "struct list element carries CUE's parenthesised wording",
+			schema: `{items: [...{price: number & >0}]}`,
+			data:   map[string]any{"items": []any{map[string]any{"price": -5.0}}},
+			path:   "items[0].price",
+			want:   ">0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := MustNew(tt.schema).Process(tt.data)
+			if r.Valid {
+				t.Fatal("expected validation to fail")
+			}
+			errs := r.ErrorsByPath(tt.path)
+			if len(errs) == 0 {
+				t.Fatalf("no error at %q; got %v", tt.path, r.Errors)
+			}
+			e := errs[0]
+			if e.Code != CodeRangeViolation {
+				t.Fatalf("expected %s at %q, got %s (%s)", CodeRangeViolation, tt.path, e.Code, e.Message)
+			}
+			if e.Bound != tt.want {
+				t.Errorf("Bound = %q, want %q", e.Bound, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnumOptionsIsCopy guards the one way this feature could corrupt an
+// otherwise correct validator: fastConstraint is built once in New() and shared
+// by every concurrent Process, so handing its slice to the caller would let one
+// caller's sort or append rewrite the schema for everybody else.
+func TestEnumOptionsIsCopy(t *testing.T) {
+	v := MustNew(`{currency: "CNY" | "USD" | "EUR"}`)
+	data := map[string]any{"currency": "USE"}
+
+	first := v.Process(data)
+	opts := first.Errors[0].EnumOptions
+	if len(opts) != 3 {
+		t.Fatalf("expected 3 options, got %q", opts)
+	}
+	// Whatever a caller does to the slice it was handed must not be observable.
+	opts[0] = "POLLUTED"
+	slices.Reverse(opts)
+
+	second := v.Process(data)
+	if got := second.Errors[0].EnumOptions; !slices.Equal(got, []string{"CNY", "USD", "EUR"}) {
+		t.Errorf("second call saw mutated options %q — internal state was shared", got)
+	}
+	// The message is rendered from the same source slice, so it must be intact too.
+	if want := `value "USE" not in enum ["CNY", "USD", "EUR"]`; second.Errors[0].Message != want {
+		t.Errorf("Message = %q, want %q", second.Errors[0].Message, want)
+	}
+}
+
+// TestStructuredFieldsSurviveErrorFormatter pins the reason these fields are
+// filled from the raw detail rather than from Message: a custom ErrorFormatter
+// replaces Message with arbitrary text, and anything parsed out of Message would
+// vanish the moment a formatter is configured.
+func TestStructuredFieldsSurviveErrorFormatter(t *testing.T) {
+	opaque := WithErrorFormatter(func(code ErrorCode, path, detail string) string {
+		return "opaque"
+	})
+
+	enum := MustNew(`{currency: "CNY" | "USD"}`, opaque).Process(map[string]any{"currency": "XXX"})
+	e := enum.Errors[0]
+	if e.Message != "opaque" {
+		t.Fatalf("formatter did not take effect: Message = %q", e.Message)
+	}
+	if !slices.Equal(e.EnumOptions, []string{"CNY", "USD"}) {
+		t.Errorf("EnumOptions = %q, want [CNY USD] despite the formatter", e.EnumOptions)
+	}
+
+	rng := MustNew(`{age: int & <=150}`, opaque).Process(map[string]any{"age": int64(200)})
+	if got := rng.Errors[0].Bound; got != "<=150" {
+		t.Errorf("Bound = %q, want %q despite the formatter", got, "<=150")
+	}
+}
+
+// TestNonEnumErrorsHaveNoEnumOptions keeps the fields honest: a localizer
+// branches on whether they are populated, so a stray value on an unrelated code
+// would produce a nonsensical sentence.
+func TestNonEnumErrorsHaveNoEnumOptions(t *testing.T) {
+	r := MustNew(`{pan: =~"^[0-9]{16}$", age: int & <=150}`).Process(map[string]any{
+		"pan": "abc",
+		"age": int64(200),
+	})
+	for _, e := range r.Errors {
+		switch e.Code {
+		case CodeRangeViolation:
+			if e.EnumOptions != nil {
+				t.Errorf("%s carries EnumOptions %q", e.Code, e.EnumOptions)
+			}
+		case CodeFormatMismatch:
+			if e.EnumOptions != nil || e.Bound != "" {
+				t.Errorf("%s carries EnumOptions %q / Bound %q", e.Code, e.EnumOptions, e.Bound)
+			}
+		}
+	}
+}
+
+// TestBoundEmptyForOverflowRangeErrors distinguishes the two things that share
+// CodeRangeViolation: breaking a bound the schema declared, and being a value no
+// finite bound can describe (±Inf, NaN). The latter has no bound to report, so
+// Bound stays empty and a renderer must fall back to generic wording rather than
+// emitting a sentence with a hole in it.
+func TestBoundEmptyForOverflowRangeErrors(t *testing.T) {
+	r := MustNew(`{amount: float & >0.0}`).Process(map[string]any{
+		"amount": math.Inf(1),
+	})
+	if r.Valid {
+		t.Fatal("expected validation to fail")
+	}
+	e := r.Errors[0]
+	if e.Code != CodeRangeViolation {
+		t.Fatalf("expected %s, got %s (%s)", CodeRangeViolation, e.Code, e.Message)
+	}
+	if !strings.Contains(e.Message, "finite range") {
+		t.Fatalf("expected a finite-range diagnostic, got %q", e.Message)
+	}
+	if e.Bound != "" {
+		t.Errorf("Bound = %q, want empty — no declared bound was broken", e.Bound)
+	}
+}
+
+// TestResultSizeStaysSmall locks the struct returned by value from every Process
+// and Validate call.
+//
+// Holding a Localizer interface here instead of a pointer grew it from 40 to 56
+// bytes and cost 5.4ns on Validate with one scalar list element — 143.0ns to
+// 148.4ns, measured, which is 3.8% of a benchmark small enough for a fixed cost
+// to show. At 48 bytes it is 142.8ns, back at the baseline; the two words appear
+// to push the return past what the register ABI carries.
+//
+// That is the whole reason Result holds *Validator and reads the localizer
+// through it, rather than holding the Localizer directly, which would read
+// better. If this test fails, check Validate_ScalarList/elements_1 before
+// updating the number.
+func TestResultSizeStaysSmall(t *testing.T) {
+	const want = 48
+	if got := unsafe.Sizeof(Result{}); got != want {
+		t.Errorf("unsafe.Sizeof(Result{}) = %d, want %d — "+
+			"a wide field was added to a struct returned by value from every call", got, want)
+	}
+}
