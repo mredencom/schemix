@@ -2,6 +2,8 @@
 
 # Schemix
 
+**Schema Mix** | /skiːmɪks/
+
 **Schema-driven validation & transformation engine**
 
 CUE constraints + Bloblang dynamic expressions, unified.
