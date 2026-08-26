@@ -2,6 +2,8 @@
 
 # Schemix
 
+**Schema Mix** | /skiːmɪks/ — 混合约束
+
 **Schema 驱动的校验与转换引擎**
 
 CUE 约束 + Bloblang 动态表达式，统一。
