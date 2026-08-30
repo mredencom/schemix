@@ -322,7 +322,7 @@ func (v *Validator) execBlobRule(st *blobLoopState, rule *blobRule, data map[str
 
 	// Value mode: the computed value must satisfy the field schema before it is
 	// allowed into Output, otherwise a rule could widen the schema it validates.
-	if !v.checkBlobResultType(rule.Path, res, st.result) {
+	if !v.checkBlobResultType(rule, res, st.result) {
 		st.markFailed(rule.Path)
 		if st.mode == FailFast {
 			return ruleAbort
@@ -371,15 +371,63 @@ func hasValidationErrorAtPath(errors []ValidationError, path string) bool {
 // checkBlobResultType verifies that a non-bool @blob result matches the
 // declared CUE field type. Returns true if type-compatible, false if a
 // E2T01 error was emitted (strict type contract).
-func (v *Validator) checkBlobResultType(path string, val any, result *Result) bool {
-	// Look up the field's CUE schema
-	field := v.findCUEField(v.cueFields, path)
-	if field == nil {
-		// No CUE field found — cannot type-check (should not happen for well-formed schemas)
-		return true
+//
+// Scalar types (string, int, float, number, bool) are decided by a Go type
+// switch in O(1) with zero allocations. Only struct and list results fall
+// through to CUE Encode+Unify+Validate, which costs ~6µs and ~30 allocs per
+// call — see the pprof analysis in the v0.3.0 performance report.
+func (v *Validator) checkBlobResultType(rule *blobRule, val any, result *Result) bool {
+	// Fast path: scalar types decided by Go type switch, zero allocs.
+	var typeName string
+	switch rule.resultKind {
+	case cue.StringKind:
+		if _, ok := val.(string); ok {
+			return true
+		}
+		typeName = "string"
+	case cue.IntKind:
+		switch val.(type) {
+		case int, int8, int16, int32, int64:
+			return true
+		}
+		typeName = "int"
+	case cue.FloatKind:
+		switch val.(type) {
+		case float32, float64:
+			return true
+		}
+		typeName = "float"
+	case cue.NumberKind:
+		switch val.(type) {
+		case int, int8, int16, int32, int64, float32, float64:
+			return true
+		}
+		typeName = "number"
+	case cue.BoolKind:
+		if _, ok := val.(bool); ok {
+			return true
+		}
+		typeName = "bool"
 	}
 
-	// Encode the computed value and unify with the field schema
+	if typeName != "" {
+		detail := fmt.Sprintf("@blob result type mismatch: computed %T, field expects %s",
+			val, typeName)
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Code:    CodeBlobTypeMismatch,
+			Path:    rule.Path,
+			Type:    TypeBloblang,
+			Message: v.formatMessage(CodeBlobTypeMismatch, rule.Path, detail),
+		})
+		return false
+	}
+
+	// Slow path: struct, list, unknown, or resultKind==0 (no kind recorded).
+	field := v.findCUEField(v.cueFields, rule.Path)
+	if field == nil {
+		return true
+	}
 	encoded := v.ctx.Encode(val)
 	unified := field.schema.Unify(encoded)
 	if err := unified.Validate(cue.Concrete(true)); err != nil {
@@ -388,9 +436,9 @@ func (v *Validator) checkBlobResultType(path string, val any, result *Result) bo
 		result.Valid = false
 		result.Errors = append(result.Errors, ValidationError{
 			Code:    CodeBlobTypeMismatch,
-			Path:    path,
+			Path:    rule.Path,
 			Type:    TypeBloblang,
-			Message: v.formatMessage(CodeBlobTypeMismatch, path, detail),
+			Message: v.formatMessage(CodeBlobTypeMismatch, rule.Path, detail),
 		})
 		return false
 	}

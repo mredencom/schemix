@@ -267,6 +267,8 @@ func (v *Validator) extractRules(val cue.Value, prefix string, depth, limit int)
 
 		attr := fieldValue.Attribute(attrBlob)
 		if attr.Err() == nil {
+			// Strip NullKind so a `null | string` field reports StringKind.
+			rk := fieldValue.IncompleteKind() &^ cue.NullKind
 			numArgs := attr.NumArgs()
 			for i := range numArgs {
 				key, _ := attr.Arg(i)
@@ -280,10 +282,11 @@ func (v *Validator) extractRules(val cue.Value, prefix string, depth, limit int)
 					return fmt.Errorf("field %q @blob(%s) compile error: %w", fullPath, expr, err)
 				}
 				v.blobRules = append(v.blobRules, blobRule{
-					Path: fullPath,
-					Exec: exec,
-					Expr: expr,
-					Meta: meta,
+					Path:       fullPath,
+					Exec:       exec,
+					Expr:       expr,
+					Meta:       meta,
+					resultKind: rk,
 				})
 			}
 		}
@@ -445,10 +448,11 @@ type FieldInfo struct {
 
 // blobRule is an extracted @blob rule with its field path and meta controls.
 type blobRule struct {
-	Path string             // field path (e.g. "address.city")
-	Exec *bloblang.Executor // compiled Bloblang expression (nil = pure meta node)
-	Expr string             // raw expression text
-	Meta fieldMeta          // field behavior controls
+	Path       string             // field path (e.g. "address.city")
+	Exec       *bloblang.Executor // compiled Bloblang expression (nil = pure meta node)
+	Expr       string             // raw expression text
+	Meta       fieldMeta          // field behavior controls
+	resultKind cue.Kind           // declared CUE type of the field, sans NullKind
 }
 
 // fieldMeta holds all @meta() attribute parameters for a field.

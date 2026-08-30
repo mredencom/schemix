@@ -6,30 +6,45 @@ import (
 )
 
 // getNestedValue retrieves a value from a nested map by dot-separated path.
+//
+// The path is walked segment by segment via strings.IndexByte rather than
+// strings.Split, which would allocate a []string on every call. These
+// functions sit on the hot path of every @blob rule that reads or writes a
+// nested field.
 func getNestedValue(data map[string]any, path string) any {
-	parts := strings.Split(path, ".")
 	var current any = data
-	for _, part := range parts {
-		switch v := current.(type) {
-		case map[string]any:
-			current = v[part]
-		default:
+	for {
+		var part string
+		if i := strings.IndexByte(path, '.'); i >= 0 {
+			part, path = path[:i], path[i+1:]
+		} else {
+			part = path
+			m, ok := current.(map[string]any)
+			if !ok {
+				return nil
+			}
+			return m[part]
+		}
+		m, ok := current.(map[string]any)
+		if !ok {
 			return nil
 		}
+		current = m[part]
 	}
-	return current
 }
 
 // setNestedValue sets a value in a nested map by dot-separated path,
 // creating intermediate maps as needed.
 func setNestedValue(data map[string]any, path string, value any) {
-	parts := strings.Split(path, ".")
 	current := data
-	for i, part := range parts {
-		if i == len(parts)-1 {
-			current[part] = value
+	for {
+		i := strings.IndexByte(path, '.')
+		if i < 0 {
+			current[path] = value
 			return
 		}
+		part := path[:i]
+		path = path[i+1:]
 		next, ok := current[part].(map[string]any)
 		if !ok {
 			next = make(map[string]any)
@@ -41,13 +56,15 @@ func setNestedValue(data map[string]any, path string, value any) {
 
 // deleteNestedKey removes a key from a nested map by dot-separated path.
 func deleteNestedKey(data map[string]any, path string) {
-	parts := strings.Split(path, ".")
 	current := data
-	for i, part := range parts {
-		if i == len(parts)-1 {
-			delete(current, part)
+	for {
+		i := strings.IndexByte(path, '.')
+		if i < 0 {
+			delete(current, path)
 			return
 		}
+		part := path[:i]
+		path = path[i+1:]
 		next, ok := current[part].(map[string]any)
 		if !ok {
 			return

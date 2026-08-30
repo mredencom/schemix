@@ -545,6 +545,42 @@ func TestBlobStrictTypeContract(t *testing.T) {
 			wantCode:  CodeBlobTypeMismatch,
 			wantPath:  "result",
 		},
+		// --- Fast-path coverage: additional types ---
+		{
+			name:      "blob_float_matches_number_field",
+			schema:    `{ a: int, fee: number @blob(this.a * 0.015) }`,
+			data:      map[string]any{"a": int64(1000)},
+			wantValid: true,
+		},
+		{
+			name:      "blob_int_matches_number_field",
+			schema:    `{ a: int, double: number @blob(this.a * 2) }`,
+			data:      map[string]any{"a": int64(5)},
+			wantValid: true,
+		},
+		{
+			name:      "blob_returns_float_for_int_field_E2T01",
+			schema:    `{ a: int, result: int @blob(this.a * 0.5) }`,
+			data:      map[string]any{"a": int64(3)},
+			wantValid: false,
+			wantCode:  CodeBlobTypeMismatch,
+			wantPath:  "result",
+		},
+		{
+			name:      "blob_returns_int_for_float_field_E2T01",
+			schema:    `{ a: int, result: float @blob(this.a * 2) }`,
+			data:      map[string]any{"a": int64(5)},
+			wantValid: false,
+			wantCode:  CodeBlobTypeMismatch,
+			wantPath:  "result",
+		},
+		// --- Nullable field: null | string should accept string ---
+		{
+			name:      "blob_string_matches_nullable_string",
+			schema:    `{ name: string, label: null | string @blob("label:" + this.name) }`,
+			data:      map[string]any{"name": "test"},
+			wantValid: true,
+		},
 	}
 
 	for _, tt := range tests {
