@@ -41,15 +41,15 @@ func (u processableUser) ToMap() map[string]any {
 
 // ─── toMapAny unit tests ─────────────────────────────────────────────────────
 
-func TestProcessValue_Map(t *testing.T) {
-	r := valueAPISchema.ProcessValue(map[string]any{"name": "Alice", "age": int64(30), "active": true})
+func TestProcess_Map(t *testing.T) {
+	r := valueAPISchema.Process(map[string]any{"name": "Alice", "age": int64(30), "active": true})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessValue_Struct(t *testing.T) {
-	r := valueAPISchema.ProcessValue(testUser{Name: "Bob", Age: 25, Active: true})
+func TestProcess_Struct(t *testing.T) {
+	r := valueAPISchema.Process(testUser{Name: "Bob", Age: 25, Active: true})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
@@ -58,30 +58,30 @@ func TestProcessValue_Struct(t *testing.T) {
 	}
 }
 
-func TestProcessValue_StructPointer(t *testing.T) {
-	r := valueAPISchema.ProcessValue(&testUser{Name: "Carol", Age: 40, Active: false})
+func TestProcess_StructPointer(t *testing.T) {
+	r := valueAPISchema.Process(&testUser{Name: "Carol", Age: 40, Active: false})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessValue_JSONBytes(t *testing.T) {
+func TestProcess_JSONBytes(t *testing.T) {
 	data := []byte(`{"name":"Dave","age":50,"active":true}`)
-	r := valueAPISchema.ProcessValue(data)
+	r := valueAPISchema.Process(data)
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessValue_Processable(t *testing.T) {
-	r := valueAPISchema.ProcessValue(processableUser{name: "Eve", age: 28, active: true})
+func TestProcess_Processable(t *testing.T) {
+	r := valueAPISchema.Process(processableUser{name: "Eve", age: 28, active: true})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessValue_InvalidType(t *testing.T) {
-	r := valueAPISchema.ProcessValue(42)
+func TestProcess_InvalidType(t *testing.T) {
+	r := valueAPISchema.Process(42)
 	if r.Valid {
 		t.Error("expected invalid for unsupported type")
 	}
@@ -90,21 +90,21 @@ func TestProcessValue_InvalidType(t *testing.T) {
 	}
 }
 
-func TestProcessValue_Nil(t *testing.T) {
-	r := valueAPISchema.ProcessValue(nil)
+func TestProcess_Nil(t *testing.T) {
+	r := valueAPISchema.Process(nil)
 	if r.Valid {
 		t.Error("expected invalid for nil")
 	}
 }
 
-func TestProcessValue_InvalidStruct(t *testing.T) {
+func TestProcess_InvalidStruct(t *testing.T) {
 	// struct that produces invalid data
 	type bad struct {
 		Name   string `json:"name"`
 		Age    int64  `json:"age"`
 		Active string `json:"active"` // wrong type: string instead of bool
 	}
-	r := valueAPISchema.ProcessValue(bad{Name: "X", Age: 10, Active: "yes"})
+	r := valueAPISchema.Process(bad{Name: "X", Age: 10, Active: "yes"})
 	if r.Valid {
 		t.Error("expected validation failure for type mismatch")
 	}
@@ -112,12 +112,12 @@ func TestProcessValue_InvalidStruct(t *testing.T) {
 
 // ─── ProcessValueWithMode tests ──────────────────────────────────────────────
 
-func TestProcessValueWithMode_FailFast(t *testing.T) {
+func TestProcess_FailFast(t *testing.T) {
 	bad := testUser{Name: "X", Age: -1, Active: true}
 	// Age is negative, but JSON marshals int64 as number → CUE sees float64
 	// This will fail the range constraint
 	data, _ := json.Marshal(bad)
-	r := valueAPISchema.ProcessValueWithMode(data, FailFast)
+	r := valueAPISchema.Process(data, FailFast)
 	if r.Valid {
 		t.Error("expected invalid")
 	}
@@ -128,15 +128,15 @@ func TestProcessValueWithMode_FailFast(t *testing.T) {
 
 // ─── ValidateValue tests ─────────────────────────────────────────────────────
 
-func TestValidateValue_Valid(t *testing.T) {
-	valid, errs := valueAPISchema.ValidateValue(testUser{Name: "Alice", Age: 30, Active: true})
+func TestValidate_FlexibleInput_Valid(t *testing.T) {
+	valid, errs := valueAPISchema.Validate(testUser{Name: "Alice", Age: 30, Active: true})
 	if !valid {
 		t.Errorf("expected valid, got errors: %v", errs)
 	}
 }
 
-func TestValidateValue_Invalid(t *testing.T) {
-	valid, errs := valueAPISchema.ValidateValue([]byte(`{"name":"X","age":-1,"active":true}`))
+func TestValidate_FlexibleInput_Invalid(t *testing.T) {
+	valid, errs := valueAPISchema.Validate([]byte(`{"name":"X","age":-1,"active":true}`))
 	if valid {
 		t.Error("expected invalid for age < 0")
 	}
@@ -145,8 +145,8 @@ func TestValidateValue_Invalid(t *testing.T) {
 	}
 }
 
-func TestValidateValue_UnsupportedType(t *testing.T) {
-	valid, errs := valueAPISchema.ValidateValue("not a struct")
+func TestValidate_FlexibleInput_UnsupportedType(t *testing.T) {
+	valid, errs := valueAPISchema.Validate("not a struct")
 	if valid {
 		t.Error("expected invalid")
 	}
@@ -155,17 +155,17 @@ func TestValidateValue_UnsupportedType(t *testing.T) {
 	}
 }
 
-// ─── ProcessStruct generic function tests ────────────────────────────────────
+// ─── struct input via Process ────────────────────────────────────────────────
 
-func TestProcessStruct_Valid(t *testing.T) {
-	r := ProcessStruct(valueAPISchema, testUser{Name: "Generic", Age: 20, Active: true})
+func TestProcess_StructInput_Valid(t *testing.T) {
+	r := valueAPISchema.Process(testUser{Name: "Generic", Age: 20, Active: true})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessStruct_Invalid(t *testing.T) {
-	r := ProcessStruct(valueAPISchema, testUser{Name: "", Age: -5, Active: true})
+func TestProcess_StructInput_Invalid(t *testing.T) {
+	r := valueAPISchema.Process(testUser{Name: "", Age: -5, Active: true})
 	// Name="" should fail string constraint (CUE treats empty string as valid string though)
 	// Age=-5 should fail >=0
 	if r.Valid {
@@ -173,13 +173,13 @@ func TestProcessStruct_Invalid(t *testing.T) {
 	}
 }
 
-func TestProcessStructWithMode_FailAll(t *testing.T) {
+func TestProcess_StructInput_FailAll(t *testing.T) {
 	type multiErr struct {
 		Name   int    `json:"name"`   // wrong type
 		Age    int64  `json:"age"`    // valid
 		Active string `json:"active"` // wrong type
 	}
-	r := ProcessStructWithMode(valueAPISchema, multiErr{Name: 0, Age: 5, Active: "yes"}, FailAll)
+	r := valueAPISchema.Process(multiErr{Name: 0, Age: 5, Active: "yes"}, FailAll)
 	if r.Valid {
 		t.Error("expected invalid")
 	}
@@ -188,17 +188,17 @@ func TestProcessStructWithMode_FailAll(t *testing.T) {
 	}
 }
 
-// ─── ValidateStruct generic function tests ───────────────────────────────────
+// ─── struct input via Validate ───────────────────────────────────────────────
 
-func TestValidateStruct_Valid(t *testing.T) {
-	valid, errs := ValidateStruct(valueAPISchema, testUser{Name: "Gen", Age: 10, Active: false})
+func TestValidate_StructInput_Valid(t *testing.T) {
+	valid, errs := valueAPISchema.Validate(testUser{Name: "Gen", Age: 10, Active: false})
 	if !valid {
 		t.Errorf("expected valid, got errors: %v", errs)
 	}
 }
 
-func TestValidateStruct_Invalid(t *testing.T) {
-	valid, _ := ValidateStruct(valueAPISchema, testUser{Name: "X", Age: -1, Active: true})
+func TestValidate_StructInput_Invalid(t *testing.T) {
+	valid, _ := valueAPISchema.Validate(testUser{Name: "X", Age: -1, Active: true})
 	if valid {
 		t.Error("expected invalid for age < 0")
 	}
@@ -214,8 +214,8 @@ func (p *processablePtr) ToMap() map[string]any {
 	return map[string]any{"name": p.val, "age": int64(1), "active": true}
 }
 
-func TestProcessValue_ProcessablePointer(t *testing.T) {
-	r := valueAPISchema.ProcessValue(&processablePtr{val: "PtrImpl"})
+func TestProcess_ProcessablePointer(t *testing.T) {
+	r := valueAPISchema.Process(&processablePtr{val: "PtrImpl"})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}

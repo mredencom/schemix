@@ -108,7 +108,7 @@ func BenchmarkProcessWithMode_FailFast(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(benchDataInvalid, FailFast)
+		v.Process(benchDataInvalid, FailFast)
 	}
 }
 
@@ -116,7 +116,7 @@ func BenchmarkProcessWithMode_FailAll(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(benchDataInvalid, FailAll)
+		v.Process(benchDataInvalid, FailAll)
 	}
 }
 
@@ -220,7 +220,7 @@ func BenchmarkProcessWithMode_FailPriority(b *testing.B) {
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(bad, FailPriority)
+		v.Process(bad, FailPriority)
 	}
 }
 

@@ -116,7 +116,7 @@ func TestConditionalRequiredIfRuntimeError(t *testing.T) {
 	}
 
 	// FailFast must return immediately from inside the required_if error path.
-	fast := cond.ProcessWithMode(data, FailFast)
+	fast := cond.Process(data, FailFast)
 	if fast.Valid {
 		t.Fatal("FailFast: expected invalid")
 	}
@@ -140,12 +140,12 @@ func TestConditionalFailFast(t *testing.T) {
 
 	data := map[string]any{"payment_type": "credit"}
 
-	all := v.ProcessWithMode(data, FailAll)
+	all := v.Process(data, FailAll)
 	if len(all.Errors) != 2 {
 		t.Fatalf("FailAll: want 2 errors (cvv, memo), got %d: %v", len(all.Errors), all.Errors)
 	}
 
-	fast := v.ProcessWithMode(data, FailFast)
+	fast := v.Process(data, FailFast)
 	if len(fast.Errors) != 1 {
 		t.Fatalf("FailFast: want exactly 1 error, got %d: %v", len(fast.Errors), fast.Errors)
 	}
@@ -184,7 +184,7 @@ func TestMetaOptionalOverridesCUERequiredness(t *testing.T) {
 
 	for name, src := range schemas {
 		t.Run(name, func(t *testing.T) {
-			r := MustNew(src).ProcessWithMode(data, FailAll)
+			r := MustNew(src).Process(data, FailAll)
 
 			if r.Valid {
 				t.Fatal("expected invalid")
@@ -214,7 +214,7 @@ func TestPlainRequiredFieldReportsMissing(t *testing.T) {
 		cvv: string
 	}`)
 
-	r := v.ProcessWithMode(map[string]any{"payment_type": "credit"}, FailAll)
+	r := v.Process(map[string]any{"payment_type": "credit"}, FailAll)
 	if !r.HasCode(CodeRequiredMissing) {
 		t.Errorf("want %s, got %v", CodeRequiredMissing, r.Errors)
 	}
@@ -349,7 +349,7 @@ func TestMetaRuntimeQueryError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected compile error: %v", err)
 			}
-			r := v.ProcessWithMode(tt.data, tt.mode)
+			r := v.Process(tt.data, tt.mode)
 			if r.Valid {
 				t.Fatal("expected validation failure, got Valid=true (silent swallow)")
 			}
@@ -395,7 +395,7 @@ func TestFailPriorityFullLayerIsolation(t *testing.T) {
 		}
 		// pan is too short — CUE regex fails at priority 1
 		data := map[string]any{"pan": "123"}
-		r := v.ProcessWithMode(data, FailPriority)
+		r := v.Process(data, FailPriority)
 
 		if r.Valid {
 			t.Fatal("expected Valid=false")
@@ -418,7 +418,7 @@ func TestFailPriorityFullLayerIsolation(t *testing.T) {
 		}
 		// pan is 16 digits but invalid luhn — priority 1 passes, priority 2 should execute
 		data := map[string]any{"pan": "1234567890123456"}
-		r := v.ProcessWithMode(data, FailPriority)
+		r := v.Process(data, FailPriority)
 
 		if r.Valid {
 			t.Fatal("expected Valid=false (luhn should fail)")
@@ -435,7 +435,7 @@ func TestFailPriorityFullLayerIsolation(t *testing.T) {
 		}
 		// Valid Visa card number (passes luhn)
 		data := map[string]any{"pan": "4111111111111111"}
-		r := v.ProcessWithMode(data, FailPriority)
+		r := v.Process(data, FailPriority)
 
 		if !r.Valid {
 			t.Fatalf("expected Valid=true, got errors: %v", r.Errors)
@@ -448,7 +448,7 @@ func TestFailPriorityFullLayerIsolation(t *testing.T) {
 			adult: bool @blob(false) @meta(priority=1)
 		}`)
 
-		r := v.ProcessWithMode(map[string]any{"name": int64(42)}, FailPriority)
+		r := v.Process(map[string]any{"name": int64(42)}, FailPriority)
 		if r.Valid {
 			t.Fatal("expected Valid=false")
 		}
@@ -476,7 +476,7 @@ func TestFailPriorityCUEGrouping(t *testing.T) {
 		}
 		// Both fields wrong — only priority 1 should be reported
 		data := map[string]any{"name": int64(123), "age": "not-int"}
-		r := v.ProcessWithMode(data, FailPriority)
+		r := v.Process(data, FailPriority)
 
 		if r.Valid {
 			t.Fatal("expected Valid=false")
@@ -677,7 +677,7 @@ func TestOutputNilOnInvalid(t *testing.T) {
 				t.Fatalf("New() error: %v", err)
 			}
 
-			r := v.ProcessWithMode(tt.data, tt.mode)
+			r := v.Process(tt.data, tt.mode)
 			if r.Valid != tt.wantValid {
 				t.Fatalf("Valid = %v, want %v; errors: %v", r.Valid, tt.wantValid, r.Errors)
 			}

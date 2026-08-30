@@ -123,21 +123,24 @@ func ExampleRegistry_RegisterFunctionsTo() {
 	// false
 }
 
-// The package-level store is deprecated and removed in v0.3.0.
+// Put files a validator that was built elsewhere, which Register cannot do
+// because it compiles from CUE source.
 //
-// A process-global registry cannot be scoped to a test, an environment, or a
-// tenant: two components sharing this process share one namespace, and a
-// collision between them is silent. Use a Registry, whose ownership is
-// explicit — reg.Put files an already-built Validator just as this did.
-//
-// This example remains only to document the behaviour of code still using it.
-func ExampleRegister() {
-	schemix.Register("currency", schemix.MustNew(`{ code: "CNY" | "USD" | "EUR" }`))
-	defer schemix.Unregister("currency")
+// This replaces the package-level store removed in v0.3.0. A process-global
+// registry could not be scoped to a test, an environment, or a tenant: two
+// components sharing the process shared one namespace, and a collision between
+// them was silent. A Registry makes the ownership explicit.
+func ExampleRegistry_Put() {
+	reg := schemix.NewRegistry()
+	if err := reg.Put("currency", schemix.MustNew(`{ code: "CNY" | "USD" | "EUR" }`)); err != nil {
+		panic(err)
+	}
 
-	fmt.Println("has:  ", schemix.Has("currency"))
-	fmt.Println("valid:", schemix.ProcessWith("currency", map[string]any{"code": "USD"}).Valid)
-	fmt.Println("valid:", schemix.ProcessWith("currency", map[string]any{"code": "JPY"}).Valid)
+	fmt.Println("has:  ", reg.Has("currency"))
+
+	v, _ := reg.Get("currency")
+	fmt.Println("valid:", v.Process(map[string]any{"code": "USD"}).Valid)
+	fmt.Println("valid:", v.Process(map[string]any{"code": "JPY"}).Valid)
 	// Output:
 	// has:   true
 	// valid: true

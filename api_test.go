@@ -146,47 +146,24 @@ func TestValidate_OriginalDataUnmodified(t *testing.T) {
 	}
 }
 
-// p1Removals lists every exported symbol that P1 deletes, as an executable
-// checklist for P0-f.
+// p1Removals lists every exported symbol still awaiting removal, as an
+// executable checklist.
 //
-// Method keys are "Receiver.Name"; package-level functions are bare names. The
-// two ProcessWithMode entries are not a typo — one is a method taking data
-// first, the other a package function taking a name first. That collision is
-// among the reasons the surface is being reworked.
+// Method keys are "Receiver.Name"; package-level functions are bare names.
 //
-// When P1 removes a symbol, drop its entry here: the test asserts the listed
-// names exist, so a stale entry fails rather than silently passing.
+// The test asserts the listed names exist and carry a marker, so a stale entry
+// fails rather than silently passing — drop an entry when its symbol goes. That
+// pairing is how the eight Validator variants, the three generic wrappers and
+// the whole package-level store came off this list.
 var p1Removals = []string{
-	// Redundant Validator entry points, folded into Process/Validate.
-	"Validator.ProcessValue",
-	"Validator.ProcessValueContext",
-	"Validator.ProcessValueWithMode",
-	"Validator.ProcessValueWithModeContext",
-	"Validator.ProcessWithMode",
-	"Validator.ProcessWithModeContext",
-	"Validator.ValidateValue",
-	"Validator.ValidateValueContext",
-
-	// Generic wrappers that promise type safety they cannot deliver.
-	"ProcessStruct",
-	"ProcessStructWithMode",
-	"ValidateStruct",
-
-	// Package-level global store.
-	"ProcessWith",
-	"ProcessWithMode",
-	"ValidateWith",
-	"Register",
-	"MustRegister",
-	"Get",
-	"MustGet",
-	"Unregister",
-	"Has",
-	"List",
-	"Len",
-
 	// Superseded by EnUS.Localize.
 	"ValidationError.FriendlyMessage",
+
+	// Global Bloblang registration, superseded by the *To forms taking an
+	// explicit environment.
+	"Registry.RegisterAll",
+	"Registry.RegisterMethods",
+	"Registry.RegisterFunctions",
 }
 
 // TestP1RemovalsAreDeprecated covers P0-f: everything P1 deletes must carry a

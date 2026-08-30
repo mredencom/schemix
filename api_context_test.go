@@ -89,7 +89,7 @@ func TestValidateContext_SameResultAsValidate(t *testing.T) {
 	}
 }
 
-func TestProcessValueContext_Struct(t *testing.T) {
+func TestProcessContext_Struct(t *testing.T) {
 	v := MustNew(`{
 		name: string
 		age:  int & >=0
@@ -100,13 +100,13 @@ func TestProcessValueContext_Struct(t *testing.T) {
 		Age  int64  `json:"age"`
 	}
 
-	r := v.ProcessValueContext(context.Background(), Person{Name: "Alice", Age: 25})
+	r := v.ProcessContext(context.Background(), Person{Name: "Alice", Age: 25})
 	if !r.Valid {
 		t.Errorf("expected valid, got errors: %v", r.Errors)
 	}
 }
 
-func TestProcessWithModeContext_FailFast(t *testing.T) {
+func TestProcessContext_FailFast(t *testing.T) {
 	v := MustNew(`{
 		a: string
 		b: int
@@ -115,7 +115,7 @@ func TestProcessWithModeContext_FailFast(t *testing.T) {
 
 	// All fields wrong type
 	data := map[string]any{"a": 123, "b": "wrong", "c": "wrong"}
-	r := v.ProcessWithModeContext(context.Background(), data, FailFast)
+	r := v.ProcessContext(context.Background(), data, FailFast)
 
 	if r.Valid {
 		t.Error("expected invalid result")
@@ -125,10 +125,10 @@ func TestProcessWithModeContext_FailFast(t *testing.T) {
 	}
 }
 
-func TestProcessWithModeContext_InvalidMode(t *testing.T) {
+func TestProcessContext_InvalidMode(t *testing.T) {
 	v := MustNew(`{ name: string }`)
 
-	r := v.ProcessWithModeContext(context.Background(), map[string]any{"name": "x"}, FailMode(99))
+	r := v.ProcessContext(context.Background(), map[string]any{"name": "x"}, FailMode(99))
 	if r.Valid {
 		t.Error("expected invalid result for bad mode")
 	}
@@ -137,7 +137,7 @@ func TestProcessWithModeContext_InvalidMode(t *testing.T) {
 	}
 }
 
-func TestValidateValueContext(t *testing.T) {
+func TestValidateContext_FlexibleInput(t *testing.T) {
 	v := MustNew(`{
 		x: int & >0
 	}`, WithName("validate-value-ctx"))
@@ -158,7 +158,7 @@ func TestValidateValueContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			valid, errs := v.ValidateValueContext(context.Background(), tt.data)
+			valid, errs := v.ValidateContext(context.Background(), tt.data)
 			if valid != tt.wantValid {
 				t.Errorf("Valid: got %v, want %v (errors: %v)", valid, tt.wantValid, errs)
 			}
@@ -166,10 +166,10 @@ func TestValidateValueContext(t *testing.T) {
 	}
 }
 
-func TestProcessValueWithModeContext_UnsupportedType(t *testing.T) {
+func TestProcessContext_UnsupportedType(t *testing.T) {
 	v := MustNew(`{ x: int }`)
 
-	r := v.ProcessValueWithModeContext(context.Background(), 42, FailAll)
+	r := v.ProcessContext(context.Background(), 42, FailAll)
 	if r.Valid {
 		t.Error("expected invalid for unsupported type")
 	}

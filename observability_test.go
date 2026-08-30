@@ -738,7 +738,7 @@ func TestWithTracerProvider_NilProvider(t *testing.T) {
 	}
 }
 
-func TestProcessWithModeContext_FailFast_SpanAttributes(t *testing.T) {
+func TestProcessContext_FailFast_SpanAttributes(t *testing.T) {
 	exp, tp := newTestProvider()
 
 	v := MustNew(`{
@@ -747,7 +747,7 @@ func TestProcessWithModeContext_FailFast_SpanAttributes(t *testing.T) {
 	}`, WithTracerProvider(tp), WithName("failfast-span"))
 
 	data := map[string]any{"a": 123, "b": "wrong"}
-	r := v.ProcessWithModeContext(context.Background(), data, FailFast)
+	r := v.ProcessContext(context.Background(), data, FailFast)
 	if r.Valid {
 		t.Fatal("expected invalid")
 	}

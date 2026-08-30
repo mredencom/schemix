@@ -65,7 +65,7 @@ func FuzzProcessWithMode(f *testing.F) {
 		mode := modes[normalizeIndex(modeIdx, len(modes))]
 
 		// Must not panic
-		r := v.ProcessWithMode(data, mode)
+		r := v.Process(data, mode)
 
 		if r.Valid != (len(r.Errors) == 0) {
 			t.Errorf("Valid=%v with %d errors", r.Valid, len(r.Errors))

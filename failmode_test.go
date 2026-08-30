@@ -36,7 +36,7 @@ func TestInvalidFailModeProcess(t *testing.T) {
 	data := map[string]any{"name": "Alice"}
 
 	// Must not panic
-	r := v.ProcessWithMode(data, FailMode(99))
+	r := v.Process(data, FailMode(99))
 
 	if r.Valid {
 		t.Fatal("expected Valid=false for invalid FailMode")
@@ -75,7 +75,7 @@ func TestValidFailModesStillWork(t *testing.T) {
 
 	for _, tc := range modes {
 		t.Run(tc.name, func(t *testing.T) {
-			r := v.ProcessWithMode(data, tc.mode)
+			r := v.Process(data, tc.mode)
 			if !r.Valid {
 				t.Errorf("expected Valid=true for %s, got errors: %v", tc.name, r.Errors)
 			}
@@ -195,7 +195,7 @@ func TestFailFastStopsWalkingFields(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 
-			r := v.ProcessWithMode(data, tc.mode)
+			r := v.Process(data, tc.mode)
 			if r.Valid {
 				t.Fatal("expected an invalid result")
 			}

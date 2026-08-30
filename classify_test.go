@@ -130,7 +130,7 @@ func TestClassifyCUEError_GoldenMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := MustNew(tt.schema)
-			r := v.ProcessWithMode(tt.data, FailAll)
+			r := v.Process(tt.data, FailAll)
 
 			if r.Valid {
 				t.Fatalf("expected invalid result for test %q", tt.name)
