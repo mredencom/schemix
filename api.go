@@ -47,34 +47,61 @@ func resolveCall(opts []CallOption) callConfig {
 // Validate performs validation only and returns (valid, errors).
 // Unlike Process, it skips deepCopy and Output construction for better performance.
 //
+// data may be a map[string]any, a struct, a *struct, JSON bytes, or a
+// Processable. Anything else fails with CodeConfigError naming the type it got.
+//
 // The FailMode defaults to FailAll and is selected per call:
 //
 //	valid, errs := v.Validate(data)                  // collect every error
 //	valid, errs := v.Validate(data, schemix.FailFast) // stop at the first
-func (v *Validator) Validate(data map[string]any, opts ...CallOption) (bool, []ValidationError) {
-	return v.validateMap(data, resolveCall(opts).mode)
+func (v *Validator) Validate(data any, opts ...CallOption) (bool, []ValidationError) {
+	m, err := toMapAny(data)
+	if err != nil {
+		return false, configErrors(err)
+	}
+	return v.validateMap(m, resolveCall(opts).mode)
 }
 
 // Process performs validation and value computation.
+//
+// data may be a map[string]any, a struct, a *struct, JSON bytes, or a
+// Processable. Anything else fails with CodeConfigError naming the type it got.
+//
+// Prefer handing in raw JSON bytes over a map you decoded yourself:
+// json.Unmarshal turns every number into a float64, and CUE keeps int and float
+// as sibling types, so an `int` field rejects a decoded 28.
 //
 // The FailMode defaults to FailAll and is selected per call:
 //
 //	r := v.Process(data)                  // collect every error
 //	r := v.Process(data, schemix.FailFast) // stop at the first
-func (v *Validator) Process(data map[string]any, opts ...CallOption) Result {
-	return v.processMap(data, resolveCall(opts).mode)
+func (v *Validator) Process(data any, opts ...CallOption) Result {
+	m, err := toMapAny(data)
+	if err != nil {
+		return v.configErrorResult(err)
+	}
+	return v.processMap(m, resolveCall(opts).mode)
 }
 
 // ProcessContext performs validation and value computation with context
-// propagation for distributed tracing.
-func (v *Validator) ProcessContext(ctx context.Context, data map[string]any, opts ...CallOption) Result {
-	return v.processMapCtx(ctx, data, resolveCall(opts).mode)
+// propagation for distributed tracing. It accepts the same input types as
+// Process.
+func (v *Validator) ProcessContext(ctx context.Context, data any, opts ...CallOption) Result {
+	m, err := toMapAny(data)
+	if err != nil {
+		return v.configErrorResult(err)
+	}
+	return v.processMapCtx(ctx, m, resolveCall(opts).mode)
 }
 
 // ValidateContext performs validation only (no Output) with context propagation
-// for distributed tracing.
-func (v *Validator) ValidateContext(ctx context.Context, data map[string]any, opts ...CallOption) (bool, []ValidationError) {
-	return v.validateMapCtx(ctx, data, resolveCall(opts).mode)
+// for distributed tracing. It accepts the same input types as Process.
+func (v *Validator) ValidateContext(ctx context.Context, data any, opts ...CallOption) (bool, []ValidationError) {
+	m, err := toMapAny(data)
+	if err != nil {
+		return false, configErrors(err)
+	}
+	return v.validateMapCtx(ctx, m, resolveCall(opts).mode)
 }
 
 // ─── unexported implementation ───────────────────────────────────────────────

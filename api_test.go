@@ -350,3 +350,99 @@ func TestCallOption(t *testing.T) {
 		}
 	})
 }
+
+// TestProcessAcceptsEveryInputType covers P1-A: the four entry points take any
+// supported input, which is what lets the eight ProcessValue/ValidateValue
+// variants go away.
+func TestProcessAcceptsEveryInputType(t *testing.T) {
+	v := MustNew(`{
+		order_id: =~"^ORD-[0-9]+$"
+		amount:   int & >0
+	}`)
+
+	cases := []struct {
+		name string
+		in   any
+	}{
+		{"map", map[string]any{"order_id": "ORD-1", "amount": int64(100)}},
+		{"struct", valueOrder{OrderID: "ORD-2", Amount: 200}},
+		{"struct pointer", &valueOrder{OrderID: "ORD-3", Amount: 300}},
+		{"JSON bytes", []byte(`{"order_id":"ORD-4","amount":400}`)},
+		{"Processable", processableOrder{id: "ORD-5", amount: 500}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if r := v.Process(tc.in); !r.Valid {
+				t.Fatalf("Process: valid = false, errors = %v", r.Errors)
+			}
+			if valid, errs := v.Validate(tc.in); !valid {
+				t.Fatalf("Validate: valid = false, errors = %v", errs)
+			}
+			ctx := context.Background()
+			if r := v.ProcessContext(ctx, tc.in); !r.Valid {
+				t.Fatalf("ProcessContext: valid = false, errors = %v", r.Errors)
+			}
+			if valid, errs := v.ValidateContext(ctx, tc.in); !valid {
+				t.Fatalf("ValidateContext: valid = false, errors = %v", errs)
+			}
+		})
+	}
+
+	t.Run("with a CallOption", func(t *testing.T) {
+		bad := []byte(`{"order_id":"NOPE","amount":-1}`)
+		r := v.Process(bad, FailFast)
+		if r.Valid {
+			t.Fatal("valid = true, want false")
+		}
+		if len(r.Errors) != 1 {
+			t.Fatalf("errors = %d, want 1 under FailFast: %v", len(r.Errors), r.Errors)
+		}
+	})
+
+	t.Run("an unsupported type names what it got and what it wanted", func(t *testing.T) {
+		// This is the cost of accepting any: a type error that the compiler used
+		// to catch now surfaces here. The message has to carry its weight.
+		for _, in := range []any{42, "str", []int{1}, 3.14, true} {
+			r := v.Process(in)
+			if r.Valid {
+				t.Fatalf("%T: valid = true, want false", in)
+			}
+			if !r.HasCode(CodeConfigError) {
+				t.Fatalf("%T: codes = %v, want %s", in, r.Errors, CodeConfigError)
+			}
+			msg := r.Errors[0].Message
+			if !strings.Contains(msg, "unsupported input type") {
+				t.Errorf("%T: message = %q, want it to say the type is unsupported", in, msg)
+			}
+			if !strings.Contains(msg, "map[string]any") {
+				t.Errorf("%T: message = %q, want it to list the accepted types", in, msg)
+			}
+		}
+	})
+
+	t.Run("nil is rejected", func(t *testing.T) {
+		r := v.Process(nil)
+		if r.Valid {
+			t.Fatal("valid = true, want false")
+		}
+		if !r.HasCode(CodeConfigError) {
+			t.Fatalf("codes = %v, want %s", r.Errors, CodeConfigError)
+		}
+	})
+}
+
+// valueOrder and processableOrder back the input-type table above.
+type valueOrder struct {
+	OrderID string `json:"order_id"`
+	Amount  int64  `json:"amount"`
+}
+
+type processableOrder struct {
+	id     string
+	amount int64
+}
+
+func (p processableOrder) ToMap() map[string]any {
+	return map[string]any{"order_id": p.id, "amount": p.amount}
+}
