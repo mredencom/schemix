@@ -32,8 +32,20 @@ func NewRegistry() *Registry {
 
 // Register compiles and stores a named validator from a CUE schema string.
 // It uses the registry's shared CUE context for efficient memory usage.
-func (r *Registry) Register(name, cueSrc string) error {
-	v, err := NewWithContext(r.cueCtx, cueSrc, WithName(name))
+//
+// Construction options are forwarded to the validator, so a schema exposed to a
+// Benthos pipeline can also use custom Bloblang functions, a metrics recorder,
+// or a localizer:
+//
+//	reg.Register("payment", src, schemix.WithMethod("is_allowed_bin", fn))
+//
+// WithName is applied last and therefore cannot be overridden: the registry key
+// is what labels metrics, so a validator filed under one name must not report
+// itself under another.
+//
+// Nothing is stored if construction fails.
+func (r *Registry) Register(name, cueSrc string, opts ...Option) error {
+	v, err := NewWithContext(r.cueCtx, cueSrc, withRegistryName(name, opts)...)
 	if err != nil {
 		return fmt.Errorf("register %q: %w", name, err)
 	}
@@ -41,6 +53,20 @@ func (r *Registry) Register(name, cueSrc string) error {
 	r.validators[name] = v
 	r.mu.Unlock()
 	return nil
+}
+
+// withRegistryName returns opts followed by WithName(name), without writing
+// into the caller's backing array.
+//
+// Appending to opts directly would be a bug: a caller passing a slice with
+// spare capacity (reg.Register(n, src, myOpts...)) would have the element after
+// myOpts silently overwritten. The explicit allocation is sized exactly, so it
+// costs one allocation per registration — irrelevant next to compiling a
+// schema.
+func withRegistryName(name string, opts []Option) []Option {
+	all := make([]Option, 0, len(opts)+1)
+	all = append(all, opts...)
+	return append(all, WithName(name))
 }
 
 // Get retrieves a validator by name.
