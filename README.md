@@ -1059,26 +1059,26 @@ Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 431 µs | 796 KiB | 22380 |
-| `Process` (valid) | **4.67 µs** | 11.90 KiB | 86 |
-| `Process` (invalid) | 5.59 µs | 13.14 KiB | 102 |
-| `Process` (nested) | 26.51 µs | 42.07 KiB | 420 |
-| `Validate` (no output) | **4.82 µs** | 11.54 KiB | 82 |
-| `Process` (parallel, 10 cores) | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields` (fast path) | 149.0 ns | 0 B | 0 |
-| `Validate` (3 scalar lists, 1 element each) | **72.9 ns** | 0 B | 0 |
-| `Validate` (3 scalar lists, 10 elements each) | **338 ns** | 0 B | 0 |
-| `Registry.Get` | 6.25 ns | 0 B | 0 |
+| `New` (compile) | 437 µs | 811 KiB | 22423 |
+| `Process` (valid) | **5.15 µs** | 11.81 KiB | 81 |
+| `Process` (invalid) | 6.67 µs | 13.14 KiB | 97 |
+| `Process` (nested) | 31.59 µs | 42.07 KiB | 417 |
+| `Validate` (no output) | **5.08 µs** | 11.46 KiB | 77 |
+| `Process` (parallel, 10 cores) | **4.91 µs** | 11.81 KiB | 81 |
+| `ValidateFields` (fast path) | 162.9 ns | 0 B | 0 |
+| `Validate` (3 scalar lists, 1 element each) | **81.1 ns** | 0 B | 0 |
+| `Validate` (3 scalar lists, 10 elements each) | **350 ns** | 0 B | 0 |
+| `Registry.Get` | 6.37 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **172x speedup** over the CUE legacy path (149.0ns vs 25.62µs).
+> achieving about **157x speedup** over the CUE legacy path (162.9ns vs 25.62µs).
 >
 > `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
 > fast path never converts the input into a `cue.Value` at all. That is exactly
-> the 39 allocations missing from every row above compared to earlier releases
-> (`Process` 125 → 86, `Validate` 121 → 82). A schema containing a struct still
+> the 44 allocations missing from every row above compared to earlier releases
+> (`Process` 125 → 81, `Validate` 121 → 77). A schema containing a struct still
 > requires the encode, which is what `Process (nested)` measures — down from 492
-> to 420 allocations now that field lookup paths are built at compile time rather
+> to 417 allocations now that field lookup paths are built at compile time rather
 > than parsed on every call.
 >
 > Lists of **scalar** elements are served by the fast path too, allocation-free.
