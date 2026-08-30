@@ -904,3 +904,75 @@ func TestLocalizerAndErrorFormatterAreOrthogonal(t *testing.T) {
 		t.Errorf("LocalizedMessages() = %q — the formatter must not reach it", got)
 	}
 }
+
+// TestValidatorLocalizer covers P0-c: reading back the configured localizer.
+//
+// WithLocalizer was write-only — none of the Validator's exported methods
+// exposed what it had been set to. A service that wants to log which language a
+// schema defaults to, or to reuse it for a message rendered outside a Result,
+// had no way to ask.
+func TestValidatorLocalizer(t *testing.T) {
+	t.Run("returns what WithLocalizer set", func(t *testing.T) {
+		v := MustNew(`{value: string}`, WithLocalizer(ZhCN))
+		if got := v.Localizer(); got != Localizer(ZhCN) {
+			t.Fatalf("Localizer() = %v, want ZhCN", got)
+		}
+	})
+
+	t.Run("returns EnUS when unset", func(t *testing.T) {
+		// Not nil: EnUS is what an unconfigured validator actually renders
+		// with, so reporting nil would force every caller to re-derive the
+		// default and would drift the moment that default changed.
+		v := MustNew(`{value: string}`)
+		if got := v.Localizer(); got != Localizer(EnUS) {
+			t.Fatalf("Localizer() = %v, want EnUS", got)
+		}
+	})
+
+	t.Run("returns a custom implementation unchanged", func(t *testing.T) {
+		custom := prefixLocalizer{prefix: "custom:"}
+		v := MustNew(`{value: string}`, WithLocalizer(custom))
+		got, ok := v.Localizer().(prefixLocalizer)
+		if !ok {
+			t.Fatalf("Localizer() type = %T, want prefixLocalizer", v.Localizer())
+		}
+		if got.prefix != "custom:" {
+			t.Fatalf("prefix = %q, want %q", got.prefix, "custom:")
+		}
+	})
+
+	t.Run("agrees with what LocalizedMessages renders", func(t *testing.T) {
+		// The point of the accessor is that it reports the validator's real
+		// behaviour. Rendering through both paths must agree, whether or not a
+		// localizer was configured.
+		for _, tc := range []struct {
+			name string
+			opts []Option
+		}{
+			{"unset", nil},
+			{"ZhCN", []Option{WithLocalizer(ZhCN)}},
+			{"custom", []Option{WithLocalizer(prefixLocalizer{prefix: "p:"})}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				v := MustNew(`{age: int & <=150}`, tc.opts...)
+				r := v.Process(map[string]any{"age": int64(200)})
+				if r.Valid {
+					t.Fatal("expected the input to fail")
+				}
+				viaResult := r.LocalizedMessages()
+				viaAccessor := r.LocalizedMessagesWith(v.Localizer())
+				if !slices.Equal(viaResult, viaAccessor) {
+					t.Fatalf("accessor disagrees with the validator:\n LocalizedMessages()          = %q\n LocalizedMessagesWith(Localizer()) = %q",
+						viaResult, viaAccessor)
+				}
+			})
+		}
+	})
+}
+
+// prefixLocalizer is a minimal Localizer for asserting pass-through.
+type prefixLocalizer struct{ prefix string }
+
+func (p prefixLocalizer) Localize(e ValidationError) string {
+	return p.prefix + string(e.Code)
+}
