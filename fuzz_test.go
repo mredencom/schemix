@@ -46,8 +46,8 @@ func FuzzProcess(f *testing.F) {
 	})
 }
 
-// FuzzProcessWithMode tests all FailModes with random inputs.
-func FuzzProcessWithMode(f *testing.F) {
+// FuzzProcessFailModes tests all FailModes with random inputs.
+func FuzzProcessFailModes(f *testing.F) {
 	v := MustNew(`{
 		x: string
 		y: int & >=0

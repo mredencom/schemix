@@ -9,7 +9,7 @@ import (
 )
 
 // Processable is an interface that types can implement to provide custom
-// map conversion logic for use with ProcessValue/ValidateValue.
+// map conversion logic for the Process and Validate entry points.
 // This gives callers full control over how their data is represented.
 type Processable interface {
 	ToMap() map[string]any

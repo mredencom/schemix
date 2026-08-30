@@ -13,7 +13,7 @@ import (
 // friendlyMessageCases pins the exact wording of every branch EnUS.Localize
 // can take: one per error code, plus one per conditional split inside a code.
 //
-// It was written when this wording still lived in FriendlyMessage, which the
+// It was written when this wording lived on the error type itself, which the
 // catalog has since absorbed, and the only tests covering it used
 // strings.Contains on four cases — enough to catch a missing field name, not
 // enough to notice a rephrased sentence, a dropped suggestion, or a swapped

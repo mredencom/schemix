@@ -280,8 +280,8 @@ func TestCallOption(t *testing.T) {
 }
 
 // TestProcessAcceptsEveryInputType covers P1-A: the four entry points take any
-// supported input, which is what lets the eight ProcessValue/ValidateValue
-// variants go away.
+// supported input, which is what let the eight map/any × mode × ctx variants
+// go away.
 func TestProcessAcceptsEveryInputType(t *testing.T) {
 	v := MustNew(`{
 		order_id: =~"^ORD-[0-9]+$"

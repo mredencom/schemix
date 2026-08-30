@@ -110,7 +110,7 @@ func TestProcess_InvalidStruct(t *testing.T) {
 	}
 }
 
-// ─── ProcessValueWithMode tests ──────────────────────────────────────────────
+// ─── CallOption on flexible input ────────────────────────────────────────────
 
 func TestProcess_FailFast(t *testing.T) {
 	bad := testUser{Name: "X", Age: -1, Active: true}
@@ -126,7 +126,7 @@ func TestProcess_FailFast(t *testing.T) {
 	}
 }
 
-// ─── ValidateValue tests ─────────────────────────────────────────────────────
+// ─── flexible input via Validate ─────────────────────────────────────────────
 
 func TestValidate_FlexibleInput_Valid(t *testing.T) {
 	valid, errs := valueAPISchema.Validate(testUser{Name: "Alice", Age: 30, Active: true})

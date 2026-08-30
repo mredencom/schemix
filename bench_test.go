@@ -104,7 +104,7 @@ func BenchmarkValidate_Valid(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessWithMode_FailFast(b *testing.B) {
+func BenchmarkProcess_FailFast(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
@@ -112,7 +112,7 @@ func BenchmarkProcessWithMode_FailFast(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessWithMode_FailAll(b *testing.B) {
+func BenchmarkProcess_FailAll(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
@@ -213,7 +213,7 @@ func BenchmarkProcess_Meta(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessWithMode_FailPriority(b *testing.B) {
+func BenchmarkProcess_FailPriority(b *testing.B) {
 	v := MustNew(benchMetaSchema)
 	bad := map[string]any{
 		"mti": "9999", "pan": "ABC", "amount": int64(-1), "currency": "999",

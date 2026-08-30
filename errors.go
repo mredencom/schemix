@@ -62,7 +62,7 @@ type ValidationError struct {
 
 	// Message is the raw diagnostic: the CUE/Bloblang wording, or the output of
 	// a custom ErrorFormatter when one is configured. Use it for logs and
-	// debugging; use FriendlyMessage for user-facing text.
+	// debugging; render a Localizer for user-facing text.
 	Message string `json:"message"`
 
 	// Suggestion names the closest valid value when one can be determined with
@@ -125,7 +125,7 @@ type Result struct {
 	// A pointer rather than the Localizer interface, because the interface's two
 	// words grew Result from 40 to 56 bytes and cost measurable time on the
 	// allocation-free scalar path — a result is returned by value from every
-	// Process and Validate call. See TestResultSizeUnchanged.
+	// Process and Validate call. See TestFastResultSizeUnchanged.
 	//
 	// The default cannot live on ValidationError instead: that type is a DTO with
 	// a json tag on every field, so it would reach API responses and add two

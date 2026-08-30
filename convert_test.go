@@ -122,4 +122,4 @@ func TestToMapAny_EmptyJSON(t *testing.T) {
 	}
 }
 
-// ─── ProcessValue tests ──────────────────────────────────────────────────────
+// ─── conversion via Process ──────────────────────────────────────────────────

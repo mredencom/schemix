@@ -358,9 +358,9 @@ func isAllDigits(s string) bool {
 // EnUS is the built-in English catalog, and the wording every other catalog
 // falls back to.
 //
-// It is also what FriendlyMessage renders, so its templates must keep producing
-// exactly the sentences that method has always returned —
-// TestEnUSMatchesFriendlyMessage holds that line.
+// Its wording is pinned by TestEnUSExactWording, one case per error code plus
+// one per conditional split inside a code. Those sentences reach API responses,
+// so rephrasing one is a visible change and the test makes it a deliberate one.
 var EnUS = &Catalog{
 	Messages: map[ErrorCode]Message{
 		CodeRequiredMissing: {Template: "{field} is required"},
