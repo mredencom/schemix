@@ -108,7 +108,7 @@ graph TD
 | **Custom Functions** | Register your own functions/methods with Bloblang-compatible API (V1 & V2 styles) |
 | **Field Control** | Priority groups, conditional required/skip, omit empty, fail-fast per field |
 | **Execution** | Three FailModes — collect all / stop at first / priority-group isolation |
-| **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations** — `cue.Context.Encode` is skipped entirely |
+| **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations**; schemas with `@blob()` rules drop from 81 to **17 allocations** thanks to compile-time type checking |
 | **Observability** | `MetricsRecorder` hooks + OpenTelemetry tracing; ready-made `schemixprom` / `schemixotel` recorders |
 | **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType) |
 | **Localization** | `Localizer` interface + built-in `EnUS` / `ZhCN` catalogs; per-request language selection |
@@ -1059,27 +1059,26 @@ Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 437 µs | 811 KiB | 22423 |
-| `Process` (valid) | **5.15 µs** | 11.81 KiB | 81 |
-| `Process` (invalid) | 6.67 µs | 13.14 KiB | 97 |
-| `Process` (nested) | 31.59 µs | 42.07 KiB | 417 |
-| `Validate` (no output) | **5.08 µs** | 11.46 KiB | 77 |
-| `Process` (parallel, 10 cores) | **4.91 µs** | 11.81 KiB | 81 |
-| `ValidateFields` (fast path) | 162.9 ns | 0 B | 0 |
-| `Validate` (3 scalar lists, 1 element each) | **81.1 ns** | 0 B | 0 |
-| `Validate` (3 scalar lists, 10 elements each) | **350 ns** | 0 B | 0 |
-| `Registry.Get` | 6.37 ns | 0 B | 0 |
+| `New` (compile) | 433 µs | 811 KiB | 22422 |
+| `Process` (valid) | **696 ns** | 696 B | 17 |
+| `Process` (invalid) | 1.55 µs | 2.04 KiB | 33 |
+| `Process` (nested) | 24.95 µs | 36.21 KiB | 382 |
+| `Validate` (no output) | **541 ns** | 360 B | 15 |
+| `Process` (parallel, 10 cores) | **274 ns** | 696 B | 17 |
+| `ValidateFields` (fast path) | 147 ns | 0 B | 0 |
+| `Validate` (3 scalar lists, 1 element each) | **75.8 ns** | 0 B | 0 |
+| `Validate` (3 scalar lists, 10 elements each) | **339 ns** | 0 B | 0 |
+| `Registry.Get` | 5.69 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **157x speedup** over the CUE legacy path (162.9ns vs 25.62µs).
+> achieving about **173x speedup** over the CUE legacy path (147ns vs 25.43µs).
 >
 > `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
-> fast path never converts the input into a `cue.Value` at all. That is exactly
-> the 44 allocations missing from every row above compared to earlier releases
-> (`Process` 125 → 81, `Validate` 121 → 77). A schema containing a struct still
-> requires the encode, which is what `Process (nested)` measures — down from 492
-> to 417 allocations now that field lookup paths are built at compile time rather
-> than parsed on every call.
+> fast path never converts the input into a `cue.Value` at all. Non-bool `@blob()`
+> results are type-checked via a Go type switch at zero cost instead of
+> CUE Encode+Unify — bringing `Process` from 81 down to **17 allocations**.
+> A schema containing a struct still requires the encode, which is what
+> `Process (nested)` measures at 382 allocations.
 >
 > Lists of **scalar** elements are served by the fast path too, allocation-free.
 > Lists of **struct** elements are not; see
@@ -1126,8 +1125,9 @@ is skipped entirely when every field is served by the Go-native fast path.
 
 Two honest boundaries on that headline:
 
-- Add **one `@blob()` rule or a nested struct** and the input must be encoded
-  into a `cue.Value` — cost jumps by an order of magnitude.
+- Add **a nested struct** and the input must be encoded into a `cue.Value` —
+  cost jumps by an order of magnitude. A `@blob()` rule on a scalar field no
+  longer triggers the encode; only its Bloblang expression is evaluated.
 - **Arrays depend on what the elements are.** A list of scalars —
   `[...string]`, `[...int & >0]`, `[..."A" | "B"]` — is served entirely by the
   fast path, allocation-free. A list of **structs** (`[...{…}]`) has no such
