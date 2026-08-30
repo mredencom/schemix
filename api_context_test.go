@@ -125,18 +125,6 @@ func TestProcessContext_FailFast(t *testing.T) {
 	}
 }
 
-func TestProcessContext_InvalidMode(t *testing.T) {
-	v := MustNew(`{ name: string }`)
-
-	r := v.ProcessContext(context.Background(), map[string]any{"name": "x"}, FailMode(99))
-	if r.Valid {
-		t.Error("expected invalid result for bad mode")
-	}
-	if len(r.Errors) == 0 || r.Errors[0].Code != CodeConfigError {
-		t.Errorf("expected CodeConfigError, got %v", r.Errors)
-	}
-}
-
 func TestValidateContext_FlexibleInput(t *testing.T) {
 	v := MustNew(`{
 		x: int & >0

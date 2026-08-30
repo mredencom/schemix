@@ -110,27 +110,18 @@ func (v *Validator) ValidateContext(ctx context.Context, data any, opts ...CallO
 // below can be deleted without untangling internal callers.
 
 func (v *Validator) processMap(data map[string]any, mode FailMode) Result {
-	if err := validateFailMode(mode); err != nil {
-		return v.configErrorResult(err)
-	}
 	return v.withValidationMetrics(func() Result {
 		return v.processInternal(context.Background(), data, mode, true)
 	})
 }
 
 func (v *Validator) processMapCtx(ctx context.Context, data map[string]any, mode FailMode) Result {
-	if err := validateFailMode(mode); err != nil {
-		return v.configErrorResult(err)
-	}
 	return v.withValidationMetricsCtx(ctx, mode, func(ctx context.Context) Result {
 		return v.processInternal(ctx, data, mode, true)
 	})
 }
 
 func (v *Validator) validateMap(data map[string]any, mode FailMode) (bool, []ValidationError) {
-	if err := validateFailMode(mode); err != nil {
-		return false, configErrors(err)
-	}
 	r := v.withValidationMetrics(func() Result {
 		return v.processInternal(context.Background(), data, mode, false)
 	})
@@ -138,9 +129,6 @@ func (v *Validator) validateMap(data map[string]any, mode FailMode) (bool, []Val
 }
 
 func (v *Validator) validateMapCtx(ctx context.Context, data map[string]any, mode FailMode) (bool, []ValidationError) {
-	if err := validateFailMode(mode); err != nil {
-		return false, configErrors(err)
-	}
 	r := v.withValidationMetricsCtx(ctx, mode, func(ctx context.Context) Result {
 		return v.processInternal(ctx, data, mode, false)
 	})

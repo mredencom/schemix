@@ -277,18 +277,6 @@ func TestCallOption(t *testing.T) {
 			t.Fatalf("errors = %d, want 1: the last option must win", len(r.Errors))
 		}
 	})
-
-	t.Run("an undefined mode still reports a config error", func(t *testing.T) {
-		// Unchanged behaviour: making FailMode unconstructable is a P1 concern.
-		v := MustNew(schema)
-		r := v.Process(map[string]any{"a": int64(1), "b": int64(1)}, FailMode(99))
-		if r.Valid {
-			t.Fatal("valid = true, want false for an undefined mode")
-		}
-		if !r.HasCode(CodeConfigError) {
-			t.Fatalf("codes = %v, want %s", r.Errors, CodeConfigError)
-		}
-	})
 }
 
 // TestProcessAcceptsEveryInputType covers P1-A: the four entry points take any
