@@ -80,7 +80,7 @@ graph TD
   - [本地化](#本地化)
     - [覆盖部分消息](#覆盖部分消息)
     - [接入已有的 i18n 体系](#接入已有的-i18n-体系)
-    - [两件它不会改变的事](#两件它不会改变的事)
+    - [一件它不会改变的事](#一件它不会改变的事)
   - [自定义错误消息](#自定义错误消息)
   - [Schema 组合](#schema-组合)
   - [Schema 自省](#schema-自省)
@@ -257,10 +257,10 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    // 把原始字节交给 ProcessValue，JSON 数字才能作为整数抵达 `int` 字段。
+    // 把原始字节交给 Process，JSON 数字才能作为整数抵达 `int` 字段。
     // 先 decode 成 map[string]any 会让所有数字变成 float64，而 CUE 的 `int`
     // 不接受 float —— 见下方说明。
-    r := userSchema.ProcessValue(raw) // FailAll：收集全部错误
+    r := userSchema.Process(raw) // FailAll：收集全部错误
     if !r.Valid {
         // 完全不是 JSON 的请求体在转换层就失败了。这与「某个字段违反规则」
         // 是两类不同的问题，应该给 400。
@@ -312,15 +312,14 @@ func catalogFor(header string) schemix.Localizer {
 无法解析的请求体是 `400`；格式正确但内容不符合 schema 是 `422`。
 `HasCode` 用来区分这两者。
 
-> **传给 `ProcessValue` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
+> **传给 `Process` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
 > 会把所有 JSON 数字变成 `float64`，而 CUE 中 `int` 与 `float` 是平行类型，
 > 所以 `age: int & >=13 & <=150` 会以 `E1T01` 拒绝 decode 出来的 `28`。
-> `ProcessValue` 会在数值允许的前提下把 JSON 数字转成整数。
+> `Process` 会在数值允许的前提下把 JSON 数字转成整数。
 > （`json.Decoder.UseNumber()` 也没用 —— `json.Number` 本质是字符串。）
 
-> **`ProcessValue` 已废弃。** 从 v0.3.0 起 `Process` 接受全部受支持的输入类型，
-> 此处将写作 `userSchema.Process(raw)`，而 `ProcessValue` 被移除。
-> 在此之前它仍是传入原始字节的唯一方式。
+> **`Process` 接受 `map[string]any`、struct、`*struct`、JSON 字节或 `Processable`。**
+> 其他类型以 `E0C01` 失败，且消息会同时给出收到的类型与全部可接受的类型。
 
 > **CUE 能表达的约束不要写成 `@blob`。** `age: int & >=13 & <=150` 失败时给出
 > `E1R01` 和 `age must be <=150`；同样的边界写成
@@ -567,7 +566,7 @@ r.Err()                              // 合并后的 error（合法时为 nil）
 r.FirstError()                       // *ValidationError
 r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
-r.ErrorsByType("cue")                // []ValidationError —— 按层过滤
+r.ErrorsByType(schemix.TypeCUE)      // []ValidationError —— 按层过滤
 r.HasCode(schemix.CodeBizRuleFailed) // bool —— 快速分类判断
 r.HasErrorsAt("email")               // bool —— 字段级判断
 ```
@@ -592,7 +591,7 @@ r := v.Process(map[string]any{"currency": "USE"}) // schema: "CNY" | "USD" | "EU
 
 r.Errors[0].Message           // value "USE" not in enum ["CNY", "USD", "EUR"]
 r.Errors[0].Suggestion        // USD
-r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+schemix.EnUS.Localize(r.Errors[0]) // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 ```
 
 > `Suggestion` 只对枚举填充。范围或正则违规没有可以合理猜测的值，
@@ -615,7 +614,7 @@ r.LocalizedMessages()
 
 ```go
 func handle(w http.ResponseWriter, req *http.Request) {
-    r := userSchema.ProcessValue(body)
+    r := userSchema.Process(body)
     if !r.Valid {
         msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
         respond(w, 422, map[string]any{"errors": msgs})
@@ -689,11 +688,14 @@ v := schemix.MustNew(schema, schemix.WithLocalizer(myLocalizer{lang: "fr"}))
 实现必须：永不返回空字符串（调用方会无条件渲染）、不包含被拒绝的值、
 保持纯函数（同一条错误要能同时渲染成两种语言）。
 
-### 两件它不会改变的事
+### 一件它不会改变的事
 
-`ValidationError.FriendlyMessage()` **始终是英文**。错误本身不携带 locale，
-给它加上 locale 等于把翻译决策塞进一个会被序列化进 API 响应的结构体。
-它仍然适合写日志、以及单语言服务；其他场景请用 `LocalizedMessages()`。
+错误本身不携带 locale。`ValidationError` 是可序列化的 DTO，所以渲染语言始终是
+调用点的决定 —— 要么经由知道默认语言的 `Result`，要么显式指定 catalog：
+
+```go
+schemix.EnUS.Localize(e)   // 单条错误，明确用英文
+```
 
 用 `v.Localizer()` 读回验证器的默认语言，未设置时报告 `EnUS` ——
 那正是未配置的验证器实际渲染所用的语言：
@@ -827,8 +829,8 @@ r := v.Process(data, schemix.FailPriority)  // 仅首个失败组
 valid, errs := v.Validate(data, schemix.FailFast)  // Validate 同样支持
 ```
 
-> 传入多个选项时以最后一个为准。`ProcessWithMode` 仍可用但已废弃，
-> 完整清单见 [CHANGELOG](CHANGELOG.md)。
+> 传入多个选项时以最后一个为准。`FailMode` 无法由任意数字构造，
+> 因此传入的 mode 必然是三者之一。
 
 > **处理契约：** 同一 `FailPriority` 组内的 CUE 与 Blob 规则都会执行并收集错误；
 > 该组失败后，不再执行更高优先级编号的组。任何无效结果均满足 `Output == nil`。
@@ -901,10 +903,8 @@ reg.RegisterAllTo(env)             // 注册 method + function 到指定 env
 reg.RegisterMethodsTo(env)         // 仅 method 形式到指定 env
 reg.RegisterFunctionsTo(env)       // 仅 function 形式到指定 env
 
-// 已废弃的全局注册（使用 GlobalEnvironment；重复注册会返回错误）
-reg.RegisterAll()                  // 注册 method + function 两种形式
-reg.RegisterMethods()              // 仅 method 形式：this.validate_schema(...) / this.process_schema(...)
-reg.RegisterFunctions()            // 仅 function 形式：validate_schema(data: ...) / process_schema(data: ...)
+// 一个环境只能被一个 Registry 占用；第二次占用会返回错误，
+// 而不是静默覆盖前一次注册。
 ```
 
 ## 可观测性

@@ -89,7 +89,7 @@
 //	r.FirstError()                   // *ValidationError
 //	r.ErrorsByPath("pan")            // []ValidationError
 //	r.ErrorsByCode(CodeTypeMismatch) // []ValidationError
-//	r.ErrorsByType("cue")            // []ValidationError — filter by layer
+//	r.ErrorsByType(TypeCUE)          // []ValidationError — filter by layer
 //	r.HasCode(CodeBizRuleFailed)     // bool — quick check
 //	r.HasErrorsAt("email")           // bool — field-level check
 //

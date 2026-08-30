@@ -81,7 +81,7 @@ graph TD
   - [Localization](#localization)
     - [Overriding messages](#overriding-messages)
     - [Using an existing i18n pipeline](#using-an-existing-i18n-pipeline)
-    - [Two things it does not change](#two-things-it-does-not-change)
+    - [One thing it does not change](#one-thing-it-does-not-change)
   - [Custom Error Messages](#custom-error-messages)
   - [Schema Composition](#schema-composition)
   - [Schema Introspection](#schema-introspection)
@@ -258,10 +258,10 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    // Hand ProcessValue the raw bytes so a JSON number reaches an `int` field as
-    // an integer. Decoding into map[string]any first makes every number a
-    // float64, and CUE's `int` rejects a float — see the note below.
-    r := userSchema.ProcessValue(raw) // FailAll: collects every error
+    // Hand Process the raw bytes so a JSON number reaches an `int` field as an
+    // integer. Decoding into map[string]any first makes every number a float64,
+    // and CUE's `int` rejects a float — see the note below.
+    r := userSchema.Process(raw) // FailAll: collects every error
     if !r.Valid {
         // A body that is not JSON at all fails at the conversion layer. That is
         // a different problem from a field that broke a rule, and deserves 400.
@@ -314,15 +314,15 @@ func catalogFor(header string) schemix.Localizer {
 A body that could not be parsed is a `400`; a well-formed body whose contents
 break the schema is a `422`. `HasCode` separates the two.
 
-> **Give `ProcessValue` the bytes, not a decoded map.** `json.Unmarshal` turns
-> every JSON number into a `float64`, and CUE keeps `int` and `float` as sibling
-> types, so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`.
-> `ProcessValue` converts JSON numbers to integers where the value allows it.
+> **Give `Process` the bytes, not a decoded map.** `json.Unmarshal` turns every
+> JSON number into a `float64`, and CUE keeps `int` and `float` as sibling types,
+> so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`. `Process`
+> converts JSON numbers to integers where the value allows it.
 > (`json.Decoder.UseNumber()` does not help — a `json.Number` is a string.)
 
-> **`ProcessValue` is deprecated.** From v0.3.0 `Process` accepts every supported
-> input type, so this becomes `userSchema.Process(raw)` and `ProcessValue` is
-> removed. Until then it remains the only way to hand in raw bytes.
+> **`Process` accepts a `map[string]any`, a struct, a `*struct`, JSON bytes, or a
+> `Processable`.** Anything else fails with `E0C01`, and the message names the
+> type it received alongside the ones it accepts.
 
 > **Prefer CUE over `@blob` for anything CUE can state.** `age: int & >=13 & <=150`
 > fails with `E1R01` and `age must be <=150`; the same bound written as
@@ -581,7 +581,7 @@ r.Err()                              // combined error (nil if valid)
 r.FirstError()                       // *ValidationError
 r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
-r.ErrorsByType("cue")                // []ValidationError — filter by layer
+r.ErrorsByType(schemix.TypeCUE)      // []ValidationError — filter by layer
 r.HasCode(schemix.CodeBizRuleFailed) // bool — quick category check
 r.HasErrorsAt("email")               // bool — field-level check
 ```
@@ -606,7 +606,7 @@ r := v.Process(map[string]any{"currency": "USE"}) // schema: "CNY" | "USD" | "EU
 
 r.Errors[0].Message           // value "USE" not in enum ["CNY", "USD", "EUR"]
 r.Errors[0].Suggestion        // USD
-r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+schemix.EnUS.Localize(r.Errors[0]) // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 ```
 
 > `Suggestion` is populated for enums only. A range or regex violation has no
@@ -630,7 +630,7 @@ concurrently** — the language is not baked in at construction:
 
 ```go
 func handle(w http.ResponseWriter, req *http.Request) {
-    r := userSchema.ProcessValue(body)
+    r := userSchema.Process(body)
     if !r.Valid {
         msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
         respond(w, 422, map[string]any{"errors": msgs})
@@ -706,12 +706,15 @@ An implementation must never return an empty string (callers render it
 unconditionally), must not include the offending value, and must stay pure so
 the same error can be rendered in two languages at once.
 
-### Two things it does not change
+### One thing it does not change
 
-`ValidationError.FriendlyMessage()` is **always English**. An error carries no
-locale, and giving it one would put a translation decision inside a struct that
-gets serialised into API responses. It remains the right choice for a log line
-and for a single-language service; use `LocalizedMessages()` otherwise.
+An error carries no locale of its own. `ValidationError` is a serialisable DTO,
+so rendering is always a decision made at the call site — either through a
+`Result` that knows the configured language, or by naming a catalog:
+
+```go
+schemix.EnUS.Localize(e)   // one error, explicitly English
+```
 
 Read back what a validator defaults to with `v.Localizer()`, which reports
 `EnUS` when none was set — that being what an unconfigured validator actually
@@ -850,8 +853,8 @@ r := v.Process(data, schemix.FailPriority)  // first failing group only
 valid, errs := v.Validate(data, schemix.FailFast)  // Validate takes one too
 ```
 
-> When several options are given the last wins. `ProcessWithMode` still works but
-> is deprecated; see the [CHANGELOG](CHANGELOG.md) for the full list.
+> When several options are given the last wins. A `FailMode` cannot be
+> constructed from an arbitrary number, so a mode is always one of the three.
 
 > **Processing contracts:** CUE and Blob rules in the same `FailPriority` group are both evaluated.
 > Once that group fails, higher-priority-number groups do not run. Any invalid result has
@@ -925,10 +928,8 @@ reg.RegisterAllTo(env)             // register both method + function forms into
 reg.RegisterMethodsTo(env)         // method form only into env
 reg.RegisterFunctionsTo(env)       // function form only into env
 
-// Deprecated global registration (uses GlobalEnvironment; repeated registration returns an error)
-reg.RegisterAll()                  // register both method + function forms
-reg.RegisterMethods()              // method form only: this.validate_schema(...) / this.process_schema(...)
-reg.RegisterFunctions()            // function form only: validate_schema(data: ...) / process_schema(data: ...)
+// An environment may be claimed by one Registry only; a second claim returns an
+// error rather than silently overwriting the first registration.
 ```
 
 ## Observability

@@ -14,24 +14,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Validator.Localizer()` reports the configured default localizer, returning `EnUS` when none was set. `WithLocalizer` was previously write-only, so a service could not log which language a schema defaults to, nor reuse it to render a message outside a `Result`.
 - `FieldInfo` reports `@meta()` controls: `Priority`, `RequiredIf`, `SkipIf`, `Conditional`, `OmitEmpty`. `Fields()` is documented for generating forms but exposed none of them, so a form could not tell that `cvv?: string @meta(conditional, required_if=...)` is required for credit payments rather than simply optional. `RequiredIf` and `SkipIf` hold the raw expression text. All five carry `omitempty`, so a schema using no `@meta` serialises exactly as before. A field carrying only `@meta(priority=N)` reports `Priority: 0`, because priority orders rule execution and such a field has no rules to order.
 
-### Deprecated
-All of the following are removed in v0.3.0. Each carries a `Deprecated:` marker naming its replacement.
+### Removed
 
-| Deprecated | Use instead |
-|------------|-------------|
+Every symbol below is gone. The two-column table is the whole migration.
+
+| Removed | Use instead |
+|---------|-------------|
 | `Validator.ProcessWithMode(data, mode)` | `v.Process(data, mode)` |
 | `Validator.ProcessWithModeContext(ctx, data, mode)` | `v.ProcessContext(ctx, data, mode)` |
-| `Validator.ProcessValue` / `ProcessValueWithMode` | `v.Process(data[, mode])` — accepts every supported input type from v0.3.0 |
-| `Validator.ProcessValueContext` / `ProcessValueWithModeContext` | `v.ProcessContext(ctx, data[, mode])` — same |
-| `Validator.ValidateValue` / `ValidateValueContext` | `v.Validate(data)` / `v.ValidateContext(ctx, data)` — same |
-| `ProcessStruct` / `ProcessStructWithMode` / `ValidateStruct` | `v.Process(data[, mode])` / `v.Validate(data)`. The type parameter constrained nothing — `T` is `any`, so `ProcessStruct(v, 42)` compiled and failed at runtime with `E0C01`. |
-| Package-level `Register` / `MustRegister` / `Get` / `MustGet` / `Unregister` / `Has` / `List` / `Len` | A `Registry`: `reg := schemix.NewRegistry()`, then `reg.Put(name, v)`, `reg.Get(name)`, and so on |
-| Package-level `ProcessWith` / `ProcessWithMode` / `ValidateWith` | `v, ok := reg.Get(name)`, then call the validator. The package-level `ProcessWithMode` shares a name with the `Validator` method while taking a name where that takes data, so a mixed-up call still compiles. |
-| `ValidationError.FriendlyMessage()` | `schemix.EnUS.Localize(e)` — the implementation is exactly that, so the wording is identical |
+| `Validator.ProcessValue` / `ProcessValueWithMode` | `v.Process(data[, mode])` |
+| `Validator.ProcessValueContext` / `ProcessValueWithModeContext` | `v.ProcessContext(ctx, data[, mode])` |
+| `Validator.ValidateValue` / `ValidateValueContext` | `v.Validate(data)` / `v.ValidateContext(ctx, data)` |
+| `ProcessStruct` / `ProcessStructWithMode` / `ValidateStruct` | `v.Process(data[, mode])` / `v.Validate(data)` |
+| Package-level `Register` / `MustRegister` / `Get` / `MustGet` / `Unregister` / `Has` / `List` / `Len` | `reg := schemix.NewRegistry()`, then `reg.Put(name, v)`, `reg.Get(name)`, … |
+| Package-level `ProcessWith` / `ProcessWithMode` / `ValidateWith` | `v, ok := reg.Get(name)`, then call the validator |
+| `ValidationError.FriendlyMessage()` | `schemix.EnUS.Localize(e)` — identical output |
+| `Registry.RegisterAll` / `RegisterMethods` / `RegisterFunctions` | `RegisterAllTo(env)` / `RegisterMethodsTo(env)` / `RegisterFunctionsTo(env)` |
 
-The package-level store is going away because a process-global registry cannot be scoped to a test, an environment, or a tenant: two components sharing a process share one namespace, and a collision between them is silent.
+Why each group went:
+
+- **The eight `Validator` variants** were `Process|Validate` × `map|any` × `mode|no mode` × `ctx|no ctx`. Widening `data` to `any` and taking the mode as a `CallOption` collapses all of them into four entry points.
+- **The three generics** promised type safety they never had: `T` is `any`, so `ProcessStruct(v, 42)` compiled and failed at runtime with `E0C01`.
+- **The package-level store** could not be scoped to a test, an environment, or a tenant. Two components sharing the process shared one namespace, and a collision between them was silent. Its `ProcessWithMode` also shared a name with the `Validator` method while taking a name where that takes data, so a mixed-up call still compiled.
+- **`FriendlyMessage`** was `return EnUS.Localize(e)`. A log line wants `Message`, which carries the error code; anything user-facing wants a `Localizer`, which can render any language.
+- **The global registration methods** registered into Bento's process-global environment, so six methods did three things.
+
 
 ### Breaking Changes
+
+Signature and type changes to symbols that still exist:
+
+- **`Process`, `ProcessContext`, `Validate` and `ValidateContext` take `data any`** instead of `map[string]any`, and accept `opts ...CallOption`. Passing a map still compiles. Passing something unsupported — `map[string]string` and `map[string]int` are the realistic cases — now fails at runtime with `E0C01` where the compiler used to object; the message names the type it received and lists the accepted ones.
+- **`FailMode` is a struct, not an int.** `FailMode(99)` and `int(mode)` no longer compile; comparisons and assignments using `FailAll`, `FailFast` and `FailPriority` are unaffected, and `FailAll` remains the zero value. An undefined mode previously came back as an invalid `Result` carrying `E0C01`, which meant a handler mapping invalid results to 422 reported a server-side configuration bug as the caller's fault. That state is now unreachable rather than reported.
+- **`Result.ErrorsByType` takes an `ErrorType`**, and `ValidationError.Type` is an `ErrorType`. `ErrorsByType("blob")` used to compile and always return nil, the correct value being `"bloblang"`. The underlying type is still `string`, so the JSON encoding is byte-for-byte unchanged — a test pins it.
+
+Validation-behaviour changes:
+
 - Constraints the Go-native fast path cannot represent exactly are no longer silently dropped. A field carrying a conjunct outside the descriptor's vocabulary — a second regex (`=~"^a" & =~"b$"`), a `!=` bound (`string & !=""`, `int & >0 & !=5`), a builtin call (`strings.MinRunes(3)`, `math.MultipleOf(0.5)`), a concrete literal (`n: 5`, `s: "hello"`, `b: true`), or a default marker (`*10 | int & >=0`, where CUE folds the disjunction and hides the `>=0`) — now falls back to CUE and is validated in full. Previously the descriptor kept only the part it understood and reported `Valid=true` with no errors, so such fields accepted invalid data. Verdicts change from accept to reject for input that violates the dropped conjunct.
 - Integer values supplied to CUE `float` fields now fail with `E1T01`. CUE keeps `int` and `float` as sibling subtypes of `number`, so `r: float` rejects `50` and accepts `50.0`; the fast path previously accepted either. This affected bare `float`, float ranges, float enums, and lists of floats. Declare the field `number` to accept both, which is what CUE itself does.
 - Non-nullable fields receiving `nil` now fail with `E1M01`.
