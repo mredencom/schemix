@@ -17,11 +17,6 @@ type Registry struct {
 	cueCtx     *cue.Context // shared CUE context for all validators in this registry
 }
 
-// globalBloblangEnvironment is a stable wrapper around Bento's process-global
-// Bloblang environment. Bento returns a new wrapper from GlobalEnvironment on
-// each call, so schemix must retain one pointer for ownership enforcement.
-var globalBloblangEnvironment = bloblang.GlobalEnvironment()
-
 // NewRegistry creates an empty validator registry with a shared CUE context.
 func NewRegistry() *Registry {
 	return &Registry{
@@ -195,14 +190,6 @@ func (r *Registry) RegisterAllTo(env *bloblang.Environment) error {
 	return r.registerFunctionsTo(env)
 }
 
-// RegisterMethods registers "validate_schema" and "process_schema"
-// Bloblang methods into the global environment.
-//
-// Deprecated: Use RegisterMethodsTo with an explicit environment.
-func (r *Registry) RegisterMethods() error {
-	return r.RegisterMethodsTo(globalBloblangEnvironment)
-}
-
 // registerMethodsTo performs the actual method registration into a given env.
 func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 	// validate_schema method
@@ -272,14 +259,6 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 	}
 
 	return nil
-}
-
-// RegisterFunctions registers "validate_schema" and "process_schema"
-// as Bloblang functions into the global environment.
-//
-// Deprecated: Use RegisterFunctionsTo with an explicit environment.
-func (r *Registry) RegisterFunctions() error {
-	return r.RegisterFunctionsTo(globalBloblangEnvironment)
 }
 
 // registerFunctionsTo performs the actual function registration into a given env.
@@ -377,14 +356,6 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 	}
 
 	return nil
-}
-
-// RegisterAll registers both method and function forms of validate_schema and
-// process_schema into the global environment.
-//
-// Deprecated: Use RegisterAllTo with an explicit environment.
-func (r *Registry) RegisterAll() error {
-	return r.RegisterAllTo(globalBloblangEnvironment)
 }
 
 // Plugin names registered with Bloblang.

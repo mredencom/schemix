@@ -2,8 +2,6 @@ package schemix
 
 import (
 	"testing"
-
-	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 func TestFailModeString(t *testing.T) {
@@ -89,13 +87,12 @@ func TestValidFailModesStillWork(t *testing.T) {
 // TestInvalidFailModeBloblangMapping verifies that Bloblang plugins reject
 // invalid mode strings at mapping construction time (not at execution time).
 func TestInvalidFailModeBloblangMapping(t *testing.T) {
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test", `{ name: string }`); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.RegisterAll(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterAllTo(env); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,7 +108,6 @@ func TestInvalidFailModeBloblangMapping(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := bloblang.GlobalEnvironment()
 			_, err := env.Parse(tc.mapping)
 			if err == nil {
 				t.Fatal("expected error from mapping construction with invalid mode, got nil")
@@ -122,13 +118,12 @@ func TestInvalidFailModeBloblangMapping(t *testing.T) {
 
 // TestValidModeBloblangMapping verifies that valid mode strings construct and execute.
 func TestValidModeBloblangMapping(t *testing.T) {
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test", `{ name: string }`); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.RegisterAll(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterAllTo(env); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,7 +131,6 @@ func TestValidModeBloblangMapping(t *testing.T) {
 
 	for _, mode := range validModes {
 		t.Run("method_validate_"+mode, func(t *testing.T) {
-			env := bloblang.GlobalEnvironment()
 			exe, err := env.Parse(`root = this.validate_schema(name: "test", mode: "` + mode + `")`)
 			if err != nil {
 				t.Fatalf("expected no error for mode %q, got: %v", mode, err)

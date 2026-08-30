@@ -120,28 +120,6 @@ func TestEnvironmentOwnership(t *testing.T) {
 	})
 }
 
-func TestDeprecatedGlobalRegistrationOwnership(t *testing.T) {
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
-
-	regA := registryWithSchema(t, "a")
-	regB := registryWithSchema(t, "b")
-
-	if err := regA.RegisterAll(); err != nil {
-		t.Fatalf("first RegisterAll: %v", err)
-	}
-	if _, err := globalBloblangEnvironment.Parse(`root = this.validate_schema(name: "a")`); err != nil {
-		t.Fatalf("deprecated global registration is not functional: %v", err)
-	}
-	if err := regA.RegisterAll(); err == nil {
-		t.Fatal("second RegisterAll from same registry returned nil")
-	}
-	err := regB.RegisterAll()
-	if err == nil || !strings.Contains(err.Error(), "already owned") {
-		t.Fatalf("RegisterAll from second registry error = %v, want already owned", err)
-	}
-}
-
 func TestRegisterToRejectsNilEnvironment(t *testing.T) {
 	reg := registryWithSchema(t, "test")
 	for name, register := range map[string]func(*bloblang.Environment) error{

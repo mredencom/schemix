@@ -10,10 +10,10 @@ import (
 	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
-// helper: compile bloblang mapping and execute against data.
-func execMapping(t *testing.T, mapping string, data map[string]any) map[string]any {
+// helper: compile bloblang mapping in env and execute against data.
+func execMapping(t *testing.T, env *bloblang.Environment, mapping string, data map[string]any) map[string]any {
 	t.Helper()
-	exec, err := bloblang.Parse(mapping)
+	exec, err := env.Parse(mapping)
 	if err != nil {
 		t.Fatalf("parse mapping: %v", err)
 	}
@@ -28,10 +28,21 @@ func execMapping(t *testing.T, mapping string, data map[string]any) map[string]a
 	return m
 }
 
+// newTestEnv returns a Bloblang environment scoped to this test, released on
+// cleanup so the ownership claim does not leak into the next one.
+//
+// Tests used to register into the process-global environment, which made them
+// share one namespace and one ownership claim — an implicit ordering
+// dependency. A per-test environment removes it.
+func newTestEnv(t *testing.T) *bloblang.Environment {
+	t.Helper()
+	env := bloblang.NewEnvironment()
+	t.Cleanup(func() { releaseEnv(env) })
+	return env
+}
+
 func setupRegistry(t *testing.T) *Registry {
 	t.Helper()
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test_schema", `{
 		name: string
@@ -56,12 +67,13 @@ func setupRegistry(t *testing.T) *Registry {
 
 func TestMethodValidateSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -70,12 +82,13 @@ func TestMethodValidateSchema_Valid(t *testing.T) {
 
 func TestMethodValidateSchema_Invalid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(200)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -88,13 +101,14 @@ func TestMethodValidateSchema_Invalid(t *testing.T) {
 
 func TestMethodValidateSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	// Use fast mode — should still work, returning at most 1 error
 	data := map[string]any{"name": 123, "age": int64(200)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema", mode: "fast")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -110,14 +124,15 @@ func TestMethodValidateSchema_WithMode(t *testing.T) {
 
 func TestMethodProcessSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "6222021234567890", "amount": int64(10000), "currency": "156",
 	}
-	r := execMapping(t, `root = this.process_schema(name: "payment")`, data)
+	r := execMapping(t, env, `root = this.process_schema(name: "payment")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -133,14 +148,15 @@ func TestMethodProcessSchema_Valid(t *testing.T) {
 
 func TestMethodProcessSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "invalid", "amount": int64(-1), "currency": "999",
 	}
-	r := execMapping(t, `root = this.process_schema(name: "payment", mode: "fast")`, data)
+	r := execMapping(t, env, `root = this.process_schema(name: "payment", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -158,12 +174,13 @@ func TestMethodProcessSchema_WithMode(t *testing.T) {
 
 func TestFunctionValidateSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -172,12 +189,13 @@ func TestFunctionValidateSchema_Valid(t *testing.T) {
 
 func TestFunctionValidateSchema_Invalid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(200)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -186,12 +204,13 @@ func TestFunctionValidateSchema_Invalid(t *testing.T) {
 
 func TestFunctionValidateSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": 123, "age": int64(200)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema", mode: "fast")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -207,14 +226,15 @@ func TestFunctionValidateSchema_WithMode(t *testing.T) {
 
 func TestFunctionProcessSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "6222021234567890", "amount": int64(10000), "currency": "156",
 	}
-	r := execMapping(t, `root = process_schema(data: this, name: "payment")`, data)
+	r := execMapping(t, env, `root = process_schema(data: this, name: "payment")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -230,14 +250,15 @@ func TestFunctionProcessSchema_Valid(t *testing.T) {
 
 func TestFunctionProcessSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "invalid", "amount": int64(-1), "currency": "999",
 	}
-	r := execMapping(t, `root = process_schema(data: this, name: "payment", mode: "fast")`, data)
+	r := execMapping(t, env, `root = process_schema(data: this, name: "payment", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -255,7 +276,8 @@ func TestFunctionProcessSchema_WithMode(t *testing.T) {
 
 func TestFunctionDynamicDataParam(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
@@ -263,7 +285,7 @@ func TestFunctionDynamicDataParam(t *testing.T) {
 	data := map[string]any{
 		"payload": map[string]any{"name": "Bob", "age": int64(25)},
 	}
-	r := execMapping(t, `root = validate_schema(data: this.payload, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this.payload, name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true with dynamic data, got %v", r["valid"])
@@ -274,20 +296,21 @@ func TestFunctionDynamicDataParam(t *testing.T) {
 
 func TestRegisterAll(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterAll(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterAllTo(env); err != nil {
 		t.Fatalf("register all: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
 
 	// Method should work
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 	if r["valid"] != true {
 		t.Errorf("method: expected valid=true, got %v", r["valid"])
 	}
 
 	// Function should work
-	r = execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r = execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 	if r["valid"] != true {
 		t.Errorf("function: expected valid=true, got %v", r["valid"])
 	}
@@ -297,12 +320,12 @@ func TestRegisterAll(t *testing.T) {
 
 func TestInvalidMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	// Invalid mode now causes a construction-time error (E0C01 contract)
-	env := bloblang.GlobalEnvironment()
 	_, err := env.Parse(`root = this.validate_schema(name: "test_schema", mode: "invalid")`)
 	if err == nil {
 		t.Fatal("expected error from mapping construction with invalid mode, got nil")
@@ -310,14 +333,13 @@ func TestInvalidMode(t *testing.T) {
 }
 
 func TestUnregisteredSchema(t *testing.T) {
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
-	exec, err := bloblang.Parse(`root = this.validate_schema(name: "nonexistent")`)
+	exec, err := env.Parse(`root = this.validate_schema(name: "nonexistent")`)
 	if err == nil {
 		// If parse succeeded, the error should come at runtime
 		_, err = exec.Query(map[string]any{"x": 1})

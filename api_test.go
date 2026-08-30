@@ -146,47 +146,13 @@ func TestValidate_OriginalDataUnmodified(t *testing.T) {
 	}
 }
 
-// p1Removals lists every exported symbol still awaiting removal, as an
-// executable checklist.
+// TestDeprecatedMarkersPointSomewhere guards the quality of any future
+// deprecation: a bare "Deprecated:" tells a caller to stop without saying what
+// to use, which is worse than no marker at all because it offers no way
+// forward.
 //
-// Method keys are "Receiver.Name"; package-level functions are bare names.
-//
-// The test asserts the listed names exist and carry a marker, so a stale entry
-// fails rather than silently passing — drop an entry when its symbol goes. That
-// pairing is how the eight Validator variants, the three generic wrappers and
-// the whole package-level store came off this list.
-var p1Removals = []string{
-	// Global Bloblang registration, superseded by the *To forms taking an
-	// explicit environment.
-	"Registry.RegisterAll",
-	"Registry.RegisterMethods",
-	"Registry.RegisterFunctions",
-}
-
-// TestP1RemovalsAreDeprecated covers P0-f: everything P1 deletes must carry a
-// Deprecated marker first, so downstream sees a warning for one release cycle
-// rather than a compile error out of nowhere.
-//
-// Checked by parsing the package rather than by eye — 23 markers spread over
-// four files is exactly the sort of list where one gets missed.
-func TestP1RemovalsAreDeprecated(t *testing.T) {
-	docs := exportedFuncDocs(t)
-
-	for _, name := range p1Removals {
-		doc, ok := docs[name]
-		if !ok {
-			t.Errorf("%s: not found in the package; if P1 removed it, drop it from p1Removals", name)
-			continue
-		}
-		if !strings.Contains(doc, "Deprecated:") {
-			t.Errorf("%s: missing a Deprecated: marker", name)
-		}
-	}
-}
-
-// TestDeprecatedMarkersPointSomewhere guards the quality of those markers: a
-// bare "Deprecated:" tells a caller to stop without saying what to use, which
-// is worse than no marker at all because it offers no way forward.
+// The package currently has none — every symbol marked during the v0.2.x cycle
+// has since been removed. The check stays because the next one will need it.
 func TestDeprecatedMarkersPointSomewhere(t *testing.T) {
 	for name, doc := range exportedFuncDocs(t) {
 		_, after, found := strings.Cut(doc, "Deprecated:")
