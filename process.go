@@ -56,7 +56,7 @@ const (
 
 // recordRuleError appends a rule error at path and marks the path failed. It
 // reports whether the caller must stop immediately because mode is FailFast.
-func (v *Validator) recordRuleError(st *blobLoopState, code ErrorCode, typ, path, detail string) bool {
+func (v *Validator) recordRuleError(st *blobLoopState, code ErrorCode, typ ErrorType, path, detail string) bool {
 	st.result.Valid = false
 	st.result.Errors = append(st.result.Errors, ValidationError{
 		Code:    code,
