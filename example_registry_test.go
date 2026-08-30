@@ -123,7 +123,14 @@ func ExampleRegistry_RegisterFunctionsTo() {
 	// false
 }
 
-// The package-level store is a convenience for validators shared process-wide.
+// The package-level store is deprecated and removed in v0.3.0.
+//
+// A process-global registry cannot be scoped to a test, an environment, or a
+// tenant: two components sharing this process share one namespace, and a
+// collision between them is silent. Use a Registry, whose ownership is
+// explicit — reg.Put files an already-built Validator just as this did.
+//
+// This example remains only to document the behaviour of code still using it.
 func ExampleRegister() {
 	schemix.Register("currency", schemix.MustNew(`{ code: "CNY" | "USD" | "EUR" }`))
 	defer schemix.Unregister("currency")

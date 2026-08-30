@@ -50,7 +50,7 @@ func ExampleValidator_Process_meta() {
 
 // The three FailModes trade error completeness against work done.
 // FailPriority isolates groups: once a group fails, later groups do not run.
-func ExampleValidator_ProcessWithMode() {
+func ExampleValidator_Process_failModes() {
 	v := schemix.MustNew(`{
 		mti:      =~"^[01][0-9]{3}$" @meta(priority=1)
 		amount:   int & >0           @meta(priority=1)
@@ -62,9 +62,9 @@ func ExampleValidator_ProcessWithMode() {
 		"mti": "9999", "amount": int64(-1), "currency": "999", "merchant": "X",
 	}
 
-	fmt.Println("FailAll:     ", len(v.ProcessWithMode(bad, schemix.FailAll).Errors), "errors")
-	fmt.Println("FailFast:    ", len(v.ProcessWithMode(bad, schemix.FailFast).Errors), "errors")
-	fmt.Println("FailPriority:", len(v.ProcessWithMode(bad, schemix.FailPriority).Errors), "errors")
+	fmt.Println("FailAll:     ", len(v.Process(bad, schemix.FailAll).Errors), "errors")
+	fmt.Println("FailFast:    ", len(v.Process(bad, schemix.FailFast).Errors), "errors")
+	fmt.Println("FailPriority:", len(v.Process(bad, schemix.FailPriority).Errors), "errors")
 	// Output:
 	// FailAll:      4 errors
 	// FailFast:     1 errors

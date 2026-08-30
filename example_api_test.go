@@ -51,6 +51,10 @@ func ExampleValidator_Validate() {
 
 // ProcessValue accepts a struct, a pointer, JSON bytes, a Processable, or a
 // plain map — anything convertible to map[string]any.
+//
+// Deprecated as of v0.2.x: Process accepts all of these from v0.3.0, where
+// ProcessValue is removed. It is still the only way to pass anything but a map
+// until then, which is why this example stays.
 func ExampleValidator_ProcessValue() {
 	v := schemix.MustNew(`{
 		order_id: =~"^ORD-[0-9]+$"
@@ -98,8 +102,14 @@ func ExampleProcessable() {
 	// Output: true
 }
 
-// ProcessStruct is the generic form; it reads better at call sites that already
-// have a concrete type.
+// ProcessStruct and friends are deprecated and removed in v0.3.0.
+//
+// The type parameter constrains nothing — T is any, so ProcessStruct(v, 42)
+// compiles and fails at runtime with E0C01. It is exactly v.ProcessValue(data)
+// with the arguments moved around, and offers no type safety over it. Call the
+// method directly.
+//
+// This example remains only to document the behaviour of code still using it.
 func ExampleProcessStruct() {
 	v := schemix.MustNew(`{
 		order_id: =~"^ORD-[0-9]+$"
@@ -133,6 +143,8 @@ func ExampleProcessStruct() {
 //     validation rule").
 //   - ProcessValue receives the raw bytes. Decoding into map[string]any first
 //     turns every JSON number into a float64, which CUE's `int` rejects.
+//     ProcessValue is deprecated; from v0.3.0 this line becomes
+//     userSchema.Process(raw), since Process then accepts every input type.
 //   - A body that is not JSON fails at the conversion layer with E0C01, which is
 //     what separates a 400 from a 422.
 func ExampleValidator_ProcessValue_httpHandler() {
