@@ -230,7 +230,7 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 				return nil, err
 			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
 			}), nil
 		},
@@ -263,7 +263,7 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 				return nil, err
 			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
 			}), nil
 		},
@@ -322,7 +322,7 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 				if !ok {
 					return nil, fmt.Errorf("%s: data param must be an object, got %T", pluginValidateSchema, dataRaw)
 				}
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
 			}, nil
 		},
@@ -368,7 +368,7 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 				if !ok {
 					return nil, fmt.Errorf("%s: data param must be an object, got %T", pluginProcessSchema, dataRaw)
 				}
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
 			}, nil
 		},

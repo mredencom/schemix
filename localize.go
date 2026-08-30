@@ -456,6 +456,12 @@ func (r Result) LocalizedMessagesWith(l Localizer) []string {
 // A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
 // from the structured fields (Code, Path, FieldType, EnumOptions, Bound,
 // Suggestion) and therefore stays stable regardless of formatter configuration.
+//
+// Deprecated: Call schemix.EnUS.Localize(e) instead — the implementation is
+// exactly that, so the wording is identical. The method occupies an awkward
+// middle ground: a log line wants Message, which carries the error code, and
+// anything user-facing wants a Localizer, which can be any language. Removed in
+// v0.3.0.
 func (e ValidationError) FriendlyMessage() string {
 	return EnUS.Localize(e)
 }
