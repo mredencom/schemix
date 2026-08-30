@@ -436,36 +436,6 @@ func (r Result) LocalizedMessagesWith(l Localizer) []string {
 	return out
 }
 
-// FriendlyMessage renders a user-facing sentence for the error.
-//
-// Message and FriendlyMessage are both always available, which is deliberate:
-// a service typically logs the raw diagnostic and renders the friendly one, and
-// needing both at once is the common case rather than a mode to switch between.
-//
-//	log.Warn(e.Message)              // raw CUE/Bloblang wording
-//	json.Encode(e.FriendlyMessage()) // user-facing text
-//
-// The text is always English. It is EnUS.Localize(e), and there is no way to
-// change that through this method — an error carries no locale, and adding one
-// would put a translation decision inside a serialised DTO. For any other
-// language, render the error with a Localizer instead:
-//
-//	msg := myCatalog.Localize(e)          // one error
-//	msgs := result.LocalizedMessages()    // whole result
-//
-// A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
-// from the structured fields (Code, Path, FieldType, EnumOptions, Bound,
-// Suggestion) and therefore stays stable regardless of formatter configuration.
-//
-// Deprecated: Call schemix.EnUS.Localize(e) instead — the implementation is
-// exactly that, so the wording is identical. The method occupies an awkward
-// middle ground: a log line wants Message, which carries the error code, and
-// anything user-facing wants a Localizer, which can be any language. Removed in
-// v0.3.0.
-func (e ValidationError) FriendlyMessage() string {
-	return EnUS.Localize(e)
-}
-
 // enumOptionsFromDetail lifts the candidate list out of an enum detail such as
 // `value "USE" not in enum ["CNY", "USD"]`, returning `["CNY", "USD"]`.
 //

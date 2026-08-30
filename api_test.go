@@ -156,9 +156,6 @@ func TestValidate_OriginalDataUnmodified(t *testing.T) {
 // pairing is how the eight Validator variants, the three generic wrappers and
 // the whole package-level store came off this list.
 var p1Removals = []string{
-	// Superseded by EnUS.Localize.
-	"ValidationError.FriendlyMessage",
-
 	// Global Bloblang registration, superseded by the *To forms taking an
 	// explicit environment.
 	"Registry.RegisterAll",

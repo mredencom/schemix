@@ -356,9 +356,9 @@ func TestArrayEnumErrorIsSingle(t *testing.T) {
 	}
 }
 
-// ─── FriendlyMessage ────────────────────────────────────────────────────────
+// ─── EnUS.Localize wording ──────────────────────────────────────────────────
 
-func TestFriendlyMessage(t *testing.T) {
+func TestEnUSLocalizeWording(t *testing.T) {
 	tests := []struct {
 		name     string
 		schema   string
@@ -396,27 +396,27 @@ func TestFriendlyMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := firstError(t, tt.schema, tt.data)
-			got := e.FriendlyMessage()
+			got := EnUS.Localize(e)
 			if got == "" {
-				t.Fatal("FriendlyMessage() returned an empty string")
+				t.Fatal("EnUS.Localize() returned an empty string")
 			}
 			for _, want := range tt.contains {
 				if !strings.Contains(got, want) {
-					t.Errorf("FriendlyMessage() = %q, missing %q", got, want)
+					t.Errorf("EnUS.Localize() = %q, missing %q", got, want)
 				}
 			}
 			for _, leak := range tt.omits {
 				if strings.Contains(got, leak) {
-					t.Errorf("FriendlyMessage() = %q, leaks %q", got, leak)
+					t.Errorf("EnUS.Localize() = %q, leaks %q", got, leak)
 				}
 			}
 		})
 	}
 }
 
-// TestFriendlyMessageNeverEmpty guarantees every error code produces something
+// TestEnUSLocalizeNeverEmpty guarantees every error code produces something
 // renderable, so a UI can call it unconditionally.
-func TestFriendlyMessageNeverEmpty(t *testing.T) {
+func TestEnUSLocalizeNeverEmpty(t *testing.T) {
 	codes := []ErrorCode{
 		CodeConfigError, CodeFormatMismatch, CodeTypeMismatch, CodeEnumInvalid,
 		CodeRangeViolation, CodeRequiredMissing, CodeArrayElement, CodeCUEOther,
@@ -425,14 +425,14 @@ func TestFriendlyMessageNeverEmpty(t *testing.T) {
 	}
 	for _, c := range codes {
 		e := ValidationError{Code: c, Path: "f", Message: "raw detail"}
-		if got := e.FriendlyMessage(); got == "" {
-			t.Errorf("code %s produced an empty FriendlyMessage()", c)
+		if got := EnUS.Localize(e); got == "" {
+			t.Errorf("code %s produced an empty localized message", c)
 		}
 	}
 }
 
 // TestErrorFormatterStillWins keeps the existing override contract: a custom
-// formatter controls Message, and FriendlyMessage must not bypass it.
+// formatter controls Message, and the localized text must not bypass it.
 func TestErrorFormatterStillWins(t *testing.T) {
 	v := MustNew(`{ age: int }`, WithErrorFormatter(
 		func(code ErrorCode, path, detail string) string {

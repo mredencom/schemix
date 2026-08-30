@@ -86,22 +86,16 @@ func ExampleResult_FirstError() {
 // An enum violation names every accepted value and suggests the closest match.
 // Suggestion is populated for enums only — a range or regex violation has no
 // meaningful value to guess.
-//
-// FriendlyMessage is deprecated and removed in v0.3.0. Its implementation is
-// EnUS.Localize(e), so the two render identically — the Output below asserts
-// that. Prefer a Localizer, which can render any language.
-func ExampleValidationError_FriendlyMessage() {
+func ExampleLocalizer_enumSuggestion() {
 	v := schemix.MustNew(`{ currency: "CNY" | "USD" | "EUR" }`)
 
 	r := v.Process(map[string]any{"currency": "USE"})
 	e := r.Errors[0]
 
 	fmt.Println("suggestion:", e.Suggestion)
-	fmt.Println("friendly:  ", e.FriendlyMessage())
-	fmt.Println("localized: ", schemix.EnUS.Localize(e)) // the replacement
+	fmt.Println("localized: ", schemix.EnUS.Localize(e))
 	// Output:
 	// suggestion: USD
-	// friendly:   currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 	// localized:  currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 }
 

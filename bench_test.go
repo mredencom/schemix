@@ -359,7 +359,7 @@ func BenchmarkValidate_NoDeepCopy_Nested(b *testing.B) {
 }
 
 // BenchmarkLocalize measures message rendering, which is now a public API rather
-// than an implementation detail of FriendlyMessage: LocalizedMessages calls it
+// than an implementation detail of the catalog: LocalizedMessages calls it
 // once per error, so a form with twenty rejected fields pays it twenty times.
 //
 // It is off the validation hot path — nothing here runs unless a caller asks for
