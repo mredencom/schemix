@@ -31,12 +31,36 @@ type cueField struct {
 
 // Fields returns the schema's field descriptors for runtime introspection.
 // This is useful for generating documentation, API specs, or UI forms.
+//
+// @meta() controls are reported alongside the CUE shape. The two live in
+// separate structures internally — the shape in cueFields, the controls on rule
+// nodes — so they are joined here by dot-path.
 func (v *Validator) Fields() []FieldInfo {
-	return convertCUEFields(v.cueFields)
+	return convertCUEFields(v.cueFields, metaByPath(v.blobRules))
+}
+
+// metaByPath indexes rule nodes by field path for the Fields join.
+//
+// A path can carry several rule nodes, because @blob(expr1, expr2) compiles one
+// per expression — but they all copy the same fieldMeta, so the first wins.
+//
+// Returns nil for a schema with no rules, which lets the join skip the lookup
+// entirely on the common introspection path.
+func metaByPath(rules []blobRule) map[string]*fieldMeta {
+	if len(rules) == 0 {
+		return nil
+	}
+	index := make(map[string]*fieldMeta, len(rules))
+	for i := range rules {
+		if _, seen := index[rules[i].Path]; !seen {
+			index[rules[i].Path] = &rules[i].Meta
+		}
+	}
+	return index
 }
 
 // convertCUEFields recursively converts internal cueField descriptors to exported FieldInfo.
-func convertCUEFields(fields []cueField) []FieldInfo {
+func convertCUEFields(fields []cueField, meta map[string]*fieldMeta) []FieldInfo {
 	if len(fields) == 0 {
 		return []FieldInfo{}
 	}
@@ -50,8 +74,15 @@ func convertCUEFields(fields []cueField) []FieldInfo {
 			Optional: f.optional,
 			HasBlob:  f.hasBlob,
 		}
+		if m := meta[f.path]; m != nil {
+			result[i].Priority = m.Priority
+			result[i].RequiredIf = m.RequiredIfExpr
+			result[i].SkipIf = m.SkipIfExpr
+			result[i].Conditional = m.Conditional
+			result[i].OmitEmpty = m.OmitEmpty
+		}
 		if len(f.children) > 0 {
-			result[i].Children = convertCUEFields(f.children)
+			result[i].Children = convertCUEFields(f.children, meta)
 		}
 	}
 	return result
@@ -397,6 +428,19 @@ type FieldInfo struct {
 	Optional bool        `json:"optional"`           // whether the field is optional
 	HasBlob  bool        `json:"has_blob"`           // has @blob() annotation
 	Children []FieldInfo `json:"children,omitempty"` // nested struct fields
+
+	// @meta() controls. All carry omitempty, so a schema using no @meta
+	// marshals exactly as it did before these existed.
+	//
+	// Priority is only available for a field that has a rule node — one with
+	// @blob, or with a conditional/omit control. A field carrying nothing but
+	// @meta(priority=N) reports 0, because priority orders rule execution and
+	// such a field has no rules to order.
+	Priority    int    `json:"priority,omitempty"`
+	RequiredIf  string `json:"required_if,omitempty"` // raw expression text
+	SkipIf      string `json:"skip_if,omitempty"`     // raw expression text
+	Conditional bool   `json:"conditional,omitempty"`
+	OmitEmpty   bool   `json:"omit_empty,omitempty"`
 }
 
 // blobRule is an extracted @blob rule with its field path and meta controls.

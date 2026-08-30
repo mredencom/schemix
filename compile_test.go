@@ -2,6 +2,7 @@ package schemix
 
 import (
 	"cmp"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -692,5 +693,162 @@ func TestDeepRecursionStillRejectsHiddenAttributes(t *testing.T) {
 	if err == nil {
 		t.Error("New() accepted a schema whose deeper levels were not analysed; " +
 			"the hidden @blob would be silently ignored")
+	}
+}
+
+// TestFields_MetaInfo covers P0-e: exposing @meta() through Fields().
+//
+// Fields() is documented for "generating documentation, API specs, or UI forms",
+// but reported nothing from @meta(). A form built from it could not tell that
+// `cvv?: string @meta(conditional, required_if=...)` is required for credit
+// payments — which is the entire point of that annotation.
+func TestFields_MetaInfo(t *testing.T) {
+	v := MustNew(`{
+		payment_type: "credit" | "debit"
+		pan:          =~"^[0-9]{16}$"       @meta(priority=1)
+		luhn:         bool   @blob(this.pan.luhn_valid()) @meta(priority=2)
+		cvv?:         string @meta(conditional, required_if=this.payment_type == "credit")
+		fee?:         number @blob(this.amount * 0.01) @meta(skip_if=this.payment_type == "debit")
+		memo?:        string @meta(optional, omit_empty)
+	}`)
+
+	byName := make(map[string]FieldInfo)
+	for _, f := range v.Fields() {
+		byName[f.Name] = f
+	}
+
+	t.Run("priority", func(t *testing.T) {
+		if got := byName["luhn"].Priority; got != 2 {
+			t.Errorf("luhn.Priority = %d, want 2", got)
+		}
+	})
+
+	t.Run("required_if carries the raw expression", func(t *testing.T) {
+		got := byName["cvv"].RequiredIf
+		if got == "" {
+			t.Fatal("cvv.RequiredIf is empty, want the raw expression")
+		}
+		if !strings.Contains(got, "payment_type") {
+			t.Errorf("cvv.RequiredIf = %q, want it to mention payment_type", got)
+		}
+	})
+
+	t.Run("skip_if carries the raw expression", func(t *testing.T) {
+		got := byName["fee"].SkipIf
+		if got == "" {
+			t.Fatal("fee.SkipIf is empty, want the raw expression")
+		}
+		if !strings.Contains(got, "debit") {
+			t.Errorf("fee.SkipIf = %q, want it to mention debit", got)
+		}
+	})
+
+	t.Run("conditional", func(t *testing.T) {
+		if !byName["cvv"].Conditional {
+			t.Error("cvv.Conditional = false, want true")
+		}
+		if byName["memo"].Conditional {
+			t.Error("memo.Conditional = true; memo declares optional, not conditional")
+		}
+	})
+
+	t.Run("omit_empty", func(t *testing.T) {
+		if !byName["memo"].OmitEmpty {
+			t.Error("memo.OmitEmpty = false, want true")
+		}
+		if byName["cvv"].OmitEmpty {
+			t.Error("cvv.OmitEmpty = true, want false")
+		}
+	})
+
+	t.Run("fields without meta are untouched", func(t *testing.T) {
+		f := byName["payment_type"]
+		if f.Priority != 0 || f.RequiredIf != "" || f.SkipIf != "" || f.Conditional || f.OmitEmpty {
+			t.Errorf("payment_type carries meta it never declared: %+v", f)
+		}
+	})
+}
+
+// TestFields_MetaInfoNested checks the join reaches nested fields, since the two
+// data sources are keyed by dot-path and recursion is where that goes wrong.
+func TestFields_MetaInfoNested(t *testing.T) {
+	v := MustNew(`{
+		order: {
+			total: number @blob(this.order.total > 0) @meta(priority=3)
+			note?: string @meta(optional, omit_empty)
+		}
+	}`)
+
+	var order FieldInfo
+	for _, f := range v.Fields() {
+		if f.Name == "order" {
+			order = f
+		}
+	}
+	if len(order.Children) == 0 {
+		t.Fatal("order has no children")
+	}
+
+	byName := make(map[string]FieldInfo)
+	for _, c := range order.Children {
+		byName[c.Name] = c
+	}
+	if got := byName["total"].Priority; got != 3 {
+		t.Errorf("order.total.Priority = %d, want 3 (path-keyed join must reach children)", got)
+	}
+	if !byName["note"].OmitEmpty {
+		t.Error("order.note.OmitEmpty = false, want true")
+	}
+}
+
+// TestFields_MetaInfoLimits pins a boundary rather than pretending it away.
+//
+// A field carrying only @meta(priority=N) — no @blob, no required_if/skip_if, no
+// omit control — is never recorded as a rule node (see the meta-only branch in
+// extractRules), so Fields() cannot report its priority. That is acceptable,
+// because priority orders rule execution and such a field has no rules to
+// order; but it must not be mistaken for a join bug.
+func TestFields_MetaInfoLimits(t *testing.T) {
+	v := MustNew(`{
+		lonely: string @meta(priority=7)
+	}`)
+
+	var f FieldInfo
+	for _, got := range v.Fields() {
+		if got.Name == "lonely" {
+			f = got
+		}
+	}
+	if f.Name == "" {
+		t.Fatal("lonely field missing from Fields()")
+	}
+	if f.Priority != 0 {
+		t.Errorf("lonely.Priority = %d, want 0: a priority-only field has no rule node, "+
+			"so the value is unavailable by design", f.Priority)
+	}
+}
+
+// TestFieldInfoJSONCompatibility locks the serialised shape. The new fields all
+// carry omitempty, so a schema that uses no @meta must marshal exactly as it did
+// before they existed.
+func TestFieldInfoJSONCompatibility(t *testing.T) {
+	v := MustNew(`{
+		name: string
+		tags: [...string]
+		addr: {city: string}
+	}`)
+
+	got, err := json.Marshal(v.Fields())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `[` +
+		`{"name":"name","path":"name","type":"string","optional":false,"has_blob":false},` +
+		`{"name":"tags","path":"tags","type":"list","optional":false,"has_blob":false},` +
+		`{"name":"addr","path":"addr","type":"struct","optional":false,"has_blob":false,` +
+		`"children":[{"name":"city","path":"addr.city","type":"string","optional":false,"has_blob":false}]}` +
+		`]`
+	if string(got) != want {
+		t.Errorf("FieldInfo JSON changed:\n got  %s\n want %s", got, want)
 	}
 }
