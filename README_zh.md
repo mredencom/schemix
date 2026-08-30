@@ -318,6 +318,10 @@ func catalogFor(header string) schemix.Localizer {
 > `ProcessValue` 会在数值允许的前提下把 JSON 数字转成整数。
 > （`json.Decoder.UseNumber()` 也没用 —— `json.Number` 本质是字符串。）
 
+> **`ProcessValue` 已废弃。** 从 v0.3.0 起 `Process` 接受全部受支持的输入类型，
+> 此处将写作 `userSchema.Process(raw)`，而 `ProcessValue` 被移除。
+> 在此之前它仍是传入原始字节的唯一方式。
+
 > **CUE 能表达的约束不要写成 `@blob`。** `age: int & >=13 & <=150` 失败时给出
 > `E1R01` 和 `age must be <=150`；同样的边界写成
 > `@blob(this.age.between(min: 13, max: 150))` 失败时给出 `E2B01` 和
@@ -691,6 +695,13 @@ v := schemix.MustNew(schema, schemix.WithLocalizer(myLocalizer{lang: "fr"}))
 给它加上 locale 等于把翻译决策塞进一个会被序列化进 API 响应的结构体。
 它仍然适合写日志、以及单语言服务；其他场景请用 `LocalizedMessages()`。
 
+用 `v.Localizer()` 读回验证器的默认语言，未设置时报告 `EnUS` ——
+那正是未配置的验证器实际渲染所用的语言：
+
+```go
+msg := v.Localizer().Localize(err)
+```
+
 `Validate` 系列方法**没有默认语言**，因为它返回 `(bool, []ValidationError)`，
 没有 `Result` 来承载默认值。这条路径上请显式本地化：
 
@@ -776,6 +787,27 @@ for _, f := range fields {
 }
 ```
 
+每个 `FieldInfo` 同时携带 CUE 形状与 `@meta()` 控制项：
+
+| 字段 | 含义 |
+|------|------|
+| `Name` / `Path` | 字段名与完整点路径 |
+| `Type` | `string`、`int`、`float`、`bool`、`struct`、`list`、`number` |
+| `Optional` | 声明了 `?` 或 `@meta(optional)` |
+| `HasBlob` | 带有 `@blob()` 注解 |
+| `Children` | 嵌套结构字段 |
+| `Priority` | 来自 `@meta(priority=N)` |
+| `RequiredIf` / `SkipIf` | `@meta(required_if=…)` / `@meta(skip_if=…)` 的原始表达式文本 |
+| `Conditional` | 声明的是 `@meta(conditional)` 而非普通 `optional` |
+| `OmitEmpty` | 来自 `@meta(omit_empty)` |
+
+`RequiredIf` 正是让生成的表单能表达「该字段在特定条件下必填」的依据 ——
+仅靠 `Optional` 无法表达这一点，而这恰是该注解存在的意义。
+
+> **仅带 `@meta(priority=N)` 的字段，`Priority` 报告为 0。** priority 用于排定规则
+> 执行顺序，而一个既无 `@blob()` 又无条件/省略控制的字段没有规则可排，
+> 因此它不会被记录为规则节点。
+
 ## FailMode 模式
 
 | 模式 | 适用场景 | 行为 |
@@ -784,11 +816,19 @@ for _, f := range fields {
 | `FailFast` | API 网关 | 遇到第一个错误即停 |
 | `FailPriority` | 分层校验 | 收集首个失败优先级组内的 CUE + Blob 错误，并跳过更高组 |
 
+`FailMode` 本身就是 `CallOption`，因此按次调用选择 —— 一份编译好的 schema
+可同时服务于策略不同的调用方：
+
 ```go
-r := v.ProcessWithMode(data, schemix.FailFast)     // 最多 1 个错误
-r := v.ProcessWithMode(data, schemix.FailAll)      // 所有错误
-r := v.ProcessWithMode(data, schemix.FailPriority) // 仅首个失败组
+r := v.Process(data)                        // FailAll —— 默认
+r := v.Process(data, schemix.FailFast)      // 最多 1 个错误
+r := v.Process(data, schemix.FailPriority)  // 仅首个失败组
+
+valid, errs := v.Validate(data, schemix.FailFast)  // Validate 同样支持
 ```
+
+> 传入多个选项时以最后一个为准。`ProcessWithMode` 仍可用但已废弃，
+> 完整清单见 [CHANGELOG](CHANGELOG.md)。
 
 > **处理契约：** 同一 `FailPriority` 组内的 CUE 与 Blob 规则都会执行并收集错误；
 > 该组失败后，不再执行更高优先级编号的组。任何无效结果均满足 `Output == nil`。
@@ -847,6 +887,9 @@ let r = process_schema(data: this.payload, name: "payment")
 ```go
 reg := schemix.NewRegistry()       // 内部共享 CUE context
 reg.Register("user", cueSrc)       // 编译 + 存储
+reg.Register("payment", cueSrc,    // 构造 option 会被转发
+    schemix.WithMethod("is_allowed_bin", fn))
+reg.Put("composed", v)             // 存入已构造好的 Validator
 reg.Has("user")                    // true
 reg.List()                         // ["user"]，按字母序排序
 reg.Len()                          // 1
@@ -973,13 +1016,15 @@ funcs.Err()                                      // 首个校验错误（valid �
 
 // 纯校验（快速路径 — 不分配 Output）
 valid, errs := v.Validate(data)
+valid, errs = v.Validate(data, schemix.FailFast)  // FailMode 即 CallOption
 
 // 处理（校验 + 计算字段）
 r := v.Process(data)
-r := v.ProcessWithMode(data, schemix.FailFast)
+r := v.Process(data, schemix.FailFast)
 
 // 自省
 fields := v.Fields()                             // []FieldInfo
+loc := v.Localizer()                             // 配置的默认值（未设置则为 EnUS）
 ```
 
 ## 性能基准

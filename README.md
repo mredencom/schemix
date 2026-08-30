@@ -320,6 +320,10 @@ break the schema is a `422`. `HasCode` separates the two.
 > `ProcessValue` converts JSON numbers to integers where the value allows it.
 > (`json.Decoder.UseNumber()` does not help — a `json.Number` is a string.)
 
+> **`ProcessValue` is deprecated.** From v0.3.0 `Process` accepts every supported
+> input type, so this becomes `userSchema.Process(raw)` and `ProcessValue` is
+> removed. Until then it remains the only way to hand in raw bytes.
+
 > **Prefer CUE over `@blob` for anything CUE can state.** `age: int & >=13 & <=150`
 > fails with `E1R01` and `age must be <=150`; the same bound written as
 > `@blob(this.age.between(min: 13, max: 150))` fails with `E2B01` and
@@ -709,6 +713,14 @@ locale, and giving it one would put a translation decision inside a struct that
 gets serialised into API responses. It remains the right choice for a log line
 and for a single-language service; use `LocalizedMessages()` otherwise.
 
+Read back what a validator defaults to with `v.Localizer()`, which reports
+`EnUS` when none was set — that being what an unconfigured validator actually
+renders with:
+
+```go
+msg := v.Localizer().Localize(err)
+```
+
 The `Validate` family gets **no default language**, because it returns
 `(bool, []ValidationError)` with no `Result` to carry one. Localize explicitly:
 
@@ -797,6 +809,28 @@ for _, f := range fields {
 }
 ```
 
+Each `FieldInfo` carries the CUE shape alongside the `@meta()` controls:
+
+| Field | Meaning |
+|-------|---------|
+| `Name` / `Path` | Field name and full dot-path |
+| `Type` | `string`, `int`, `float`, `bool`, `struct`, `list`, `number` |
+| `Optional` | Declared with `?` or `@meta(optional)` |
+| `HasBlob` | Carries an `@blob()` annotation |
+| `Children` | Nested struct fields |
+| `Priority` | From `@meta(priority=N)` |
+| `RequiredIf` / `SkipIf` | Raw expression text from `@meta(required_if=…)` / `@meta(skip_if=…)` |
+| `Conditional` | Declared `@meta(conditional)` rather than plain `optional` |
+| `OmitEmpty` | From `@meta(omit_empty)` |
+
+`RequiredIf` is what lets a generated form state that a field is required **under
+a condition** rather than merely optional — `Optional` alone cannot express that,
+which was the point of the annotation.
+
+> **A field carrying only `@meta(priority=N)` reports `Priority: 0`.** Priority
+> orders rule execution, and a field with no `@blob()` and no conditional or omit
+> control has no rules to order, so it is never recorded as a rule node.
+
 ## FailMode
 
 | Mode | Best For | Behavior |
@@ -805,11 +839,19 @@ for _, f := range fields {
 | `FailFast` | API gateway | Stop at first error |
 | `FailPriority` | Layered validation | Collect CUE + Blob errors in the first failing priority group; skip higher groups |
 
+A `FailMode` is a `CallOption`, so it is chosen per call — one compiled schema
+serves callers wanting different strategies:
+
 ```go
-r := v.ProcessWithMode(data, schemix.FailFast)     // 1 error max
-r := v.ProcessWithMode(data, schemix.FailAll)      // all errors
-r := v.ProcessWithMode(data, schemix.FailPriority) // first failing group only
+r := v.Process(data)                        // FailAll — the default
+r := v.Process(data, schemix.FailFast)      // 1 error max
+r := v.Process(data, schemix.FailPriority)  // first failing group only
+
+valid, errs := v.Validate(data, schemix.FailFast)  // Validate takes one too
 ```
+
+> When several options are given the last wins. `ProcessWithMode` still works but
+> is deprecated; see the [CHANGELOG](CHANGELOG.md) for the full list.
 
 > **Processing contracts:** CUE and Blob rules in the same `FailPriority` group are both evaluated.
 > Once that group fails, higher-priority-number groups do not run. Any invalid result has
@@ -869,6 +911,9 @@ let r = process_schema(data: this.payload, name: "payment")
 ```go
 reg := schemix.NewRegistry()       // shared CUE context internally
 reg.Register("user", cueSrc)       // compile + store
+reg.Register("payment", cueSrc,    // construction options are forwarded
+    schemix.WithMethod("is_allowed_bin", fn))
+reg.Put("composed", v)             // file an already-built Validator
 reg.Has("user")                    // true
 reg.List()                         // ["user"] — sorted
 reg.Len()                          // 1
@@ -996,13 +1041,15 @@ funcs.Err()                                      // first validation error (nil 
 
 // Validation (fast path — no Output allocation)
 valid, errs := v.Validate(data)
+valid, errs = v.Validate(data, schemix.FailFast)  // FailMode is a CallOption
 
 // Processing (validation + computed fields)
 r := v.Process(data)
-r := v.ProcessWithMode(data, schemix.FailFast)
+r := v.Process(data, schemix.FailFast)
 
 // Introspection
 fields := v.Fields()                             // []FieldInfo
+loc := v.Localizer()                             // configured default (EnUS if unset)
 ```
 
 ## Benchmarks

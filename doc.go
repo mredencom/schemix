@@ -58,6 +58,15 @@
 //   - FailFast: stop at first error (best for API gateways)
 //   - FailPriority: priority-group isolation (p1 failure skips p2+)
 //
+// A FailMode is a CallOption, so it is selected per call with no wrapper:
+//
+//	r := v.Process(data)                       // FailAll
+//	r := v.Process(data, schemix.FailFast)     // stop at the first error
+//	valid, errs := v.Validate(data, schemix.FailFast)
+//
+// One compiled schema therefore serves callers wanting different strategies.
+// When several options are given, the last one wins.
+//
 // # Error Handling
 //
 // Errors serve three audiences, and Result has a set of methods for each.
@@ -116,9 +125,14 @@
 // Localizer is an interface, so an existing translation pipeline can be used
 // directly instead of moving its catalogue into Go.
 //
-// Two things it does not affect: ValidationError.FriendlyMessage is always
-// English, and the Validate family carries no default because it returns errors
-// without a Result. Localize those explicitly.
+// Read back what a validator defaults to with Validator.Localizer, which reports
+// EnUS when none was set — that being what an unconfigured validator renders
+// with:
+//
+//	msg := v.Localizer().Localize(err)
+//
+// The Validate family carries no default language, because it returns errors
+// without a Result to hold one. Localize those explicitly.
 //
 // # Custom Error Messages
 //
@@ -186,7 +200,13 @@
 //
 // Inspect schema structure at runtime for documentation or UI generation:
 //
-//	fields := v.Fields() // []FieldInfo{Name, Path, Type, Optional, HasBlob, Children}
+//	fields := v.Fields() // []FieldInfo
+//
+// Each FieldInfo carries the CUE shape (Name, Path, Type, Optional, HasBlob,
+// Children) alongside the @meta() controls (Priority, RequiredIf, SkipIf,
+// Conditional, OmitEmpty). RequiredIf and SkipIf hold the raw expression text,
+// which is what lets a generated form state that a field is required only under
+// a condition rather than merely optional.
 //
 // # Performance
 //
@@ -200,7 +220,20 @@
 //
 //	reg := schemix.NewRegistry()
 //	reg.Register("payment", cueSrc)
-//	reg.RegisterAll() // registers both method and function forms
+//
+//	env := bloblang.NewEnvironment()
+//	reg.RegisterAllTo(env) // registers both method and function forms
+//
+// Register forwards construction options, so a schema in a pipeline can use
+// custom Bloblang functions:
+//
+//	reg.Register("payment", cueSrc, schemix.WithMethod("is_allowed_bin", fn))
+//
+// Registry.Put files a validator that was built elsewhere — from NewFromValue,
+// or sharing a FuncMap with its siblings:
+//
+//	v, _ := schemix.NewFromValue(schema)
+//	reg.Put("composed", v)
 //
 // Then use in Bloblang mappings:
 //
