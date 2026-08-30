@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
@@ -545,6 +547,136 @@ func TestRegisterWithOptions(t *testing.T) {
 		}
 		if valid, errs := v.Validate(map[string]any{"value": "ok"}); !valid {
 			t.Fatalf("Validate = false, errs = %v", errs)
+		}
+	})
+}
+
+// TestPut covers P0-b: storing an already-constructed validator.
+//
+// Register builds from CUE source, which leaves no way to put a validator that
+// was built any other way into a registry — NewFromValue with shared
+// definitions, or one sharing a FuncMap with its siblings. Put closes that gap.
+func TestPut(t *testing.T) {
+	t.Run("stored validator is retrievable", func(t *testing.T) {
+		reg := NewRegistry()
+		v := MustNew(`{value: string}`)
+		if err := reg.Put("direct", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		got, ok := reg.Get("direct")
+		if !ok {
+			t.Fatal("Get = false, want true")
+		}
+		if got != v {
+			t.Fatal("Get returned a different validator than the one stored")
+		}
+		if !reg.Has("direct") {
+			t.Fatal("Has = false, want true")
+		}
+		if !slices.Contains(reg.List(), "direct") {
+			t.Fatalf("List = %v, want it to contain %q", reg.List(), "direct")
+		}
+	})
+
+	t.Run("stored validator reaches the Bloblang plugin", func(t *testing.T) {
+		// This is the point of Put: a validator built from a pre-compiled CUE
+		// value can now serve a Benthos pipeline.
+		ctx := cuecontext.New()
+		defs := ctx.CompileString(`#Pan: =~"^[0-9]{16}$"`)
+		schema := ctx.CompileString(`{pan: #Pan}`, cue.Scope(defs))
+		v, err := NewFromValue(schema)
+		if err != nil {
+			t.Fatalf("NewFromValue: %v", err)
+		}
+
+		reg := NewRegistry()
+		if err := reg.Put("composed", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		env := bloblang.NewEnvironment()
+		t.Cleanup(func() { releaseEnv(env) })
+		if err := reg.RegisterAllTo(env); err != nil {
+			t.Fatalf("RegisterAllTo: %v", err)
+		}
+		exec, err := env.Parse(`root = this.validate_schema(name: "composed")`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+
+		for _, tc := range []struct {
+			pan  string
+			want bool
+		}{
+			{"6212345678901234", true},
+			{"not-a-pan", false},
+		} {
+			got, err := exec.Query(map[string]any{"pan": tc.pan})
+			if err != nil {
+				t.Fatalf("query %q: %v", tc.pan, err)
+			}
+			result, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("result type = %T, want map[string]any", got)
+			}
+			if result["valid"] != tc.want {
+				t.Fatalf("pan %q: valid = %v, want %v", tc.pan, result["valid"], tc.want)
+			}
+		}
+	})
+
+	t.Run("nil validator is rejected", func(t *testing.T) {
+		// Storing nil would make Get return (nil, true), and the Bloblang
+		// plugin calls the returned validator without a nil check — the panic
+		// would surface inside a pipeline, far from this call.
+		reg := NewRegistry()
+		if err := reg.Put("empty", nil); err == nil {
+			t.Fatal("Put(nil) = nil error, want failure")
+		}
+		if reg.Has("empty") {
+			t.Fatal("a rejected Put must not store anything")
+		}
+	})
+
+	t.Run("replaces an existing entry", func(t *testing.T) {
+		// Same semantics as Register, which also overwrites.
+		reg := NewRegistry()
+		first := MustNew(`{value: string}`)
+		second := MustNew(`{value: int}`)
+		if err := reg.Put("dup", first); err != nil {
+			t.Fatalf("first Put: %v", err)
+		}
+		if err := reg.Put("dup", second); err != nil {
+			t.Fatalf("second Put: %v", err)
+		}
+		got, _ := reg.Get("dup")
+		if got != second {
+			t.Fatal("Get did not return the most recently stored validator")
+		}
+		if reg.Len() != 1 {
+			t.Fatalf("Len = %d, want 1", reg.Len())
+		}
+	})
+
+	t.Run("does not relabel metrics with the registry key", func(t *testing.T) {
+		// A known and deliberate limitation: a Validator is immutable after
+		// construction, so unlike Register — which forces WithName(name) — Put
+		// cannot make the metrics label agree with the registry key. Callers
+		// who need them to agree must pass WithName themselves. This test pins
+		// the behaviour so the limitation cannot drift unnoticed.
+		rec := &fakeRecorder{}
+		v := MustNew(`{value: string}`, WithMetricsRecorder(rec), WithName("built-as"))
+		reg := NewRegistry()
+		if err := reg.Put("filed-as", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		v.Validate(map[string]any{"value": "ok"})
+
+		if len(rec.validationCalls) != 1 {
+			t.Fatalf("ObserveValidation calls = %d, want 1", len(rec.validationCalls))
+		}
+		if got := rec.validationCalls[0].schemaName; got != "built-as" {
+			t.Fatalf("schemaName = %q, want %q: Put must not rewrite it", got, "built-as")
 		}
 	})
 }

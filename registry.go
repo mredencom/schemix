@@ -69,6 +69,33 @@ func withRegistryName(name string, opts []Option) []Option {
 	return append(all, WithName(name))
 }
 
+// Put stores an already-constructed validator under the given name, replacing
+// any existing entry.
+//
+// Register builds from CUE source, which leaves no way to file a validator that
+// was built any other way — one from NewFromValue with shared definitions, or
+// one sharing a FuncMap with its siblings:
+//
+//	v, _ := schemix.NewFromValue(schema)
+//	reg.Put("composed", v)
+//
+// Unlike Register, Put cannot make the validator's metrics label agree with the
+// registry key, because a Validator is immutable once constructed. Pass
+// WithName yourself if the two need to match.
+//
+// A nil validator is rejected: storing one would make Get return (nil, true),
+// and the Bloblang plugins call what Get returns without a nil check, so the
+// panic would surface inside a pipeline rather than here.
+func (r *Registry) Put(name string, v *Validator) error {
+	if v == nil {
+		return fmt.Errorf("put %q: nil validator", name)
+	}
+	r.mu.Lock()
+	r.validators[name] = v
+	r.mu.Unlock()
+	return nil
+}
+
 // Get retrieves a validator by name.
 func (r *Registry) Get(name string) (*Validator, bool) {
 	r.mu.RLock()
