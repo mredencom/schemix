@@ -108,7 +108,7 @@ jobs:
           # functions in the root package); it keeps the base checkout, which may
           # predate that change, comparable to head.
           packages="$(go list ./... | grep -v '/example$')"
-          go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_base.txt
+          go test -run='^$' -bench=. -benchmem -count=10 -timeout=10m $packages > ../bench_base.txt
 
       - name: Benchmark head
         working-directory: head
@@ -119,7 +119,7 @@ jobs:
           # functions in the root package); it keeps the base checkout, which may
           # predate that change, comparable to head.
           packages="$(go list ./... | grep -v '/example$')"
-          go test -run='^$' -bench=. -benchmem -count=6 -timeout=10m $packages > ../bench_head.txt
+          go test -run='^$' -bench=. -benchmem -count=10 -timeout=10m $packages > ../bench_head.txt
 
       - name: Compare benchmarks
         shell: bash
