@@ -1,10 +1,10 @@
 module github.com/mredencom/schemix
 
-go 1.25.0
+go 1.26.6
 
 require (
 	cuelang.org/go v0.17.1
-	github.com/warpstreamlabs/bento v1.17.0
+	github.com/warpstreamlabs/bento v1.21.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
@@ -37,7 +37,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
