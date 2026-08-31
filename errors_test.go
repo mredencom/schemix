@@ -724,10 +724,10 @@ func TestErrorTypeIsTyped(t *testing.T) {
 	t.Run("the constants are ErrorType, not untyped strings", func(t *testing.T) {
 		// A compile-time assertion: were these still untyped constants, the
 		// declaration below would fail.
-		var _ ErrorType = TypeCUE
-		var _ ErrorType = TypeBloblang
-		var _ ErrorType = TypeMeta
-		var _ ErrorType = TypeConfig
+		_ = ErrorType(TypeCUE)
+		_ = ErrorType(TypeBloblang)
+		_ = ErrorType(TypeMeta)
+		_ = ErrorType(TypeConfig)
 
 		if got := r.Errors[0].Type; got != TypeCUE && got != TypeBloblang {
 			t.Fatalf("Type = %q, want one of the declared ErrorType constants", got)
