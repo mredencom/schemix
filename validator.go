@@ -30,6 +30,25 @@ type Validator struct {
 
 // formatMessage returns the user-facing error message. If an ErrorFormatter is
 // configured, it delegates to the formatter; otherwise returns the default detail.
+// Localizer reports the default localizer for this validator, as set by
+// WithLocalizer. It returns EnUS when none was configured.
+//
+// EnUS rather than nil, because that is what an unconfigured validator actually
+// renders with — see Result.LocalizedMessagesWith. Reporting nil would make
+// every caller re-derive the default, and those copies would drift the moment
+// the default changed.
+//
+// Useful for logging which language a compiled schema defaults to, or for
+// rendering a message outside a Result:
+//
+//	msg := v.Localizer().Localize(err)
+func (v *Validator) Localizer() Localizer {
+	if v.localizer == nil {
+		return EnUS
+	}
+	return v.localizer
+}
+
 func (v *Validator) formatMessage(code ErrorCode, path, detail string) string {
 	if v.errorFormatter != nil {
 		return v.errorFormatter(code, path, detail)

@@ -39,7 +39,7 @@ func TestRequiredField_AllMissingShouldFail(t *testing.T) {
 	}`)
 
 	// Both fields missing
-	r := v.ProcessWithMode(map[string]any{}, FailAll)
+	r := v.Process(map[string]any{}, FailAll)
 	if r.Valid {
 		t.Fatal("expected invalid result when all required fields are missing")
 	}
@@ -142,7 +142,7 @@ func TestRequiredField_FailFastStopsAtFirst(t *testing.T) {
 		city: string
 	}`)
 
-	r := v.ProcessWithMode(map[string]any{}, FailFast)
+	r := v.Process(map[string]any{}, FailFast)
 	if r.Valid {
 		t.Fatal("expected invalid in FailFast with all fields missing")
 	}

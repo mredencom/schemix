@@ -53,7 +53,7 @@ var builtinErrorCodes = []ErrorCode{
 type ValidationError struct {
 	Code ErrorCode `json:"code"` // structured error code
 	Path string    `json:"path"` // field path (e.g. "merchant.country")
-	Type string    `json:"type"` // "cue", "bloblang", or "meta"
+	Type ErrorType `json:"type"` // which layer produced this error
 
 	// FieldType is the schema type of the offending field — "string", "int",
 	// "float", "number", "bool", "struct" or "list". Empty when the error is not
@@ -62,7 +62,7 @@ type ValidationError struct {
 
 	// Message is the raw diagnostic: the CUE/Bloblang wording, or the output of
 	// a custom ErrorFormatter when one is configured. Use it for logs and
-	// debugging; use FriendlyMessage for user-facing text.
+	// debugging; render a Localizer for user-facing text.
 	Message string `json:"message"`
 
 	// Suggestion names the closest valid value when one can be determined with
@@ -125,7 +125,7 @@ type Result struct {
 	// A pointer rather than the Localizer interface, because the interface's two
 	// words grew Result from 40 to 56 bytes and cost measurable time on the
 	// allocation-free scalar path — a result is returned by value from every
-	// Process and Validate call. See TestResultSizeUnchanged.
+	// Process and Validate call. See TestFastResultSizeUnchanged.
 	//
 	// The default cannot live on ValidationError instead: that type is a DTO with
 	// a json tag on every field, so it would reach API responses and add two
@@ -190,7 +190,7 @@ func (r Result) ErrorsByCode(code ErrorCode) []ValidationError {
 }
 
 // ErrorsByType returns all errors of the specified type ("cue", "bloblang", "meta").
-func (r Result) ErrorsByType(typ string) []ValidationError {
+func (r Result) ErrorsByType(typ ErrorType) []ValidationError {
 	var out []ValidationError
 	for _, e := range r.Errors {
 		if e.Type == typ {
@@ -229,10 +229,17 @@ func (r Result) ErrorMessages() string {
 	return strings.Join(msgs, "\n")
 }
 
+// ErrorType identifies which layer produced a ValidationError.
+//
+// The underlying type is string, so the JSON encoding is unchanged; naming the
+// type is what stops ErrorsByType("blob") from compiling and silently matching
+// nothing, the correct value being "bloblang".
+type ErrorType string
+
 // Validation error type identifiers (user-facing, for filtering ValidationError.Type).
 const (
-	TypeCUE      = "cue"
-	TypeBloblang = "bloblang"
-	TypeMeta     = "meta"
-	TypeConfig   = "config"
+	TypeCUE      ErrorType = "cue"
+	TypeBloblang ErrorType = "bloblang"
+	TypeMeta     ErrorType = "meta"
+	TypeConfig   ErrorType = "config"
 )

@@ -10,11 +10,11 @@ import (
 	"unicode"
 )
 
-// friendlyMessageCases pins the exact wording of every branch FriendlyMessage
+// friendlyMessageCases pins the exact wording of every branch EnUS.Localize
 // can take: one per error code, plus one per conditional split inside a code.
 //
-// It exists because FriendlyMessage is about to be reimplemented on top of a
-// message catalog, and the only tests covering its wording used
+// It was written when this wording lived on the error type itself, which the
+// catalog has since absorbed, and the only tests covering it used
 // strings.Contains on four cases — enough to catch a missing field name, not
 // enough to notice a rephrased sentence, a dropped suggestion, or a swapped
 // dash. Every string below was captured from the implementation that predates
@@ -157,20 +157,20 @@ var friendlyMessageCases = []struct {
 	},
 }
 
-func TestFriendlyMessageExactWording(t *testing.T) {
+func TestEnUSExactWording(t *testing.T) {
 	for _, tt := range friendlyMessageCases {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.err.FriendlyMessage(); got != tt.want {
-				t.Errorf("FriendlyMessage()\n got: %q\nwant: %q", got, tt.want)
+			if got := EnUS.Localize(tt.err); got != tt.want {
+				t.Errorf("EnUS.Localize()\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestFriendlyMessageExactWordingFromRealValidation checks the same wording
+// TestEnUSExactWordingFromRealValidation checks the same wording
 // against errors a validator actually produced, so the hand-built cases above
 // cannot drift away from the shapes that occur in practice.
-func TestFriendlyMessageExactWordingFromRealValidation(t *testing.T) {
+func TestEnUSExactWordingFromRealValidation(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema string
@@ -238,31 +238,14 @@ func TestFriendlyMessageExactWordingFromRealValidation(t *testing.T) {
 			if len(errs) == 0 {
 				t.Fatalf("no error at %q; got %v", tt.path, r.Errors)
 			}
-			if got := errs[0].FriendlyMessage(); got != tt.want {
-				t.Errorf("FriendlyMessage()\n got: %q\nwant: %q", got, tt.want)
+			if got := EnUS.Localize(errs[0]); got != tt.want {
+				t.Errorf("EnUS.Localize()\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
 	}
 }
 
 // --- Localizer and Catalog ---
-
-// TestEnUSMatchesFriendlyMessage is the reason FriendlyMessage can be
-// reimplemented on top of a catalog at all: the two must agree on every branch,
-// byte for byte, or existing callers would see their wording shift under them.
-func TestEnUSMatchesFriendlyMessage(t *testing.T) {
-	for _, tt := range friendlyMessageCases {
-		t.Run(tt.name, func(t *testing.T) {
-			got := EnUS.Localize(tt.err)
-			if got != tt.want {
-				t.Errorf("EnUS.Localize()\n got: %q\nwant: %q", got, tt.want)
-			}
-			if friendly := tt.err.FriendlyMessage(); got != friendly {
-				t.Errorf("EnUS.Localize() = %q, FriendlyMessage() = %q — they must not diverge", got, friendly)
-			}
-		})
-	}
-}
 
 func TestCatalogSatisfiesLocalizer(t *testing.T) {
 	var _ Localizer = EnUS
@@ -844,25 +827,6 @@ func TestResultJSONExcludesLocalizer(t *testing.T) {
 	}
 }
 
-// TestWithLocalizerDoesNotAffectFriendlyMessage records a rough edge rather than
-// a feature. FriendlyMessage is a method on the error, the error carries no
-// locale, and giving it one would put a translation decision inside a serialised
-// DTO. So a validator configured for Chinese still answers English here.
-//
-// The test exists so that a later reader treats this as decided rather than
-// broken, and fixes the call site instead of the method.
-func TestWithLocalizerDoesNotAffectFriendlyMessage(t *testing.T) {
-	r := MustNew(localizerTestSchema, WithLocalizer(ZhCN)).Process(localizerTestData)
-
-	localized := r.LocalizedMessages()[1]
-	if localized != "age必须满足 <=150" {
-		t.Fatalf("LocalizedMessages() = %q, want Chinese", localized)
-	}
-	if friendly := r.Errors[1].FriendlyMessage(); friendly != "age must be <=150" {
-		t.Errorf("FriendlyMessage() = %q; it is always English by design", friendly)
-	}
-}
-
 // TestValidateFamilyHasNoDefaultLocalizer pins an asymmetry. Validate returns
 // (bool, []ValidationError) with no Result to carry a default, so a configured
 // localizer cannot reach it. Changing that signature is a breaking change, and
@@ -874,9 +838,10 @@ func TestValidateFamilyHasNoDefaultLocalizer(t *testing.T) {
 	if valid || len(errs) == 0 {
 		t.Fatal("expected validation to fail")
 	}
-	// English, because nothing carried the configured localizer here.
-	if got := errs[1].FriendlyMessage(); got != "age must be <=150" {
-		t.Errorf("FriendlyMessage() = %q", got)
+	// English only because the caller asked for English; nothing carried the
+	// configured localizer to this path.
+	if got := EnUS.Localize(errs[1]); got != "age must be <=150" {
+		t.Errorf("EnUS.Localize() = %q", got)
 	}
 	// The supported way to localize on this path is to say so.
 	if got := ZhCN.Localize(errs[1]); got != "age必须满足 <=150" {
@@ -903,4 +868,76 @@ func TestLocalizerAndErrorFormatterAreOrthogonal(t *testing.T) {
 	if got := r.LocalizedMessages()[1]; got != "age必须满足 <=150" {
 		t.Errorf("LocalizedMessages() = %q — the formatter must not reach it", got)
 	}
+}
+
+// TestValidatorLocalizer covers P0-c: reading back the configured localizer.
+//
+// WithLocalizer was write-only — none of the Validator's exported methods
+// exposed what it had been set to. A service that wants to log which language a
+// schema defaults to, or to reuse it for a message rendered outside a Result,
+// had no way to ask.
+func TestValidatorLocalizer(t *testing.T) {
+	t.Run("returns what WithLocalizer set", func(t *testing.T) {
+		v := MustNew(`{value: string}`, WithLocalizer(ZhCN))
+		if got := v.Localizer(); got != Localizer(ZhCN) {
+			t.Fatalf("Localizer() = %v, want ZhCN", got)
+		}
+	})
+
+	t.Run("returns EnUS when unset", func(t *testing.T) {
+		// Not nil: EnUS is what an unconfigured validator actually renders
+		// with, so reporting nil would force every caller to re-derive the
+		// default and would drift the moment that default changed.
+		v := MustNew(`{value: string}`)
+		if got := v.Localizer(); got != Localizer(EnUS) {
+			t.Fatalf("Localizer() = %v, want EnUS", got)
+		}
+	})
+
+	t.Run("returns a custom implementation unchanged", func(t *testing.T) {
+		custom := prefixLocalizer{prefix: "custom:"}
+		v := MustNew(`{value: string}`, WithLocalizer(custom))
+		got, ok := v.Localizer().(prefixLocalizer)
+		if !ok {
+			t.Fatalf("Localizer() type = %T, want prefixLocalizer", v.Localizer())
+		}
+		if got.prefix != "custom:" {
+			t.Fatalf("prefix = %q, want %q", got.prefix, "custom:")
+		}
+	})
+
+	t.Run("agrees with what LocalizedMessages renders", func(t *testing.T) {
+		// The point of the accessor is that it reports the validator's real
+		// behaviour. Rendering through both paths must agree, whether or not a
+		// localizer was configured.
+		for _, tc := range []struct {
+			name string
+			opts []Option
+		}{
+			{"unset", nil},
+			{"ZhCN", []Option{WithLocalizer(ZhCN)}},
+			{"custom", []Option{WithLocalizer(prefixLocalizer{prefix: "p:"})}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				v := MustNew(`{age: int & <=150}`, tc.opts...)
+				r := v.Process(map[string]any{"age": int64(200)})
+				if r.Valid {
+					t.Fatal("expected the input to fail")
+				}
+				viaResult := r.LocalizedMessages()
+				viaAccessor := r.LocalizedMessagesWith(v.Localizer())
+				if !slices.Equal(viaResult, viaAccessor) {
+					t.Fatalf("accessor disagrees with the validator:\n LocalizedMessages()          = %q\n LocalizedMessagesWith(Localizer()) = %q",
+						viaResult, viaAccessor)
+				}
+			})
+		}
+	})
+}
+
+// prefixLocalizer is a minimal Localizer for asserting pass-through.
+type prefixLocalizer struct{ prefix string }
+
+func (p prefixLocalizer) Localize(e ValidationError) string {
+	return p.prefix + string(e.Code)
 }

@@ -358,9 +358,9 @@ func isAllDigits(s string) bool {
 // EnUS is the built-in English catalog, and the wording every other catalog
 // falls back to.
 //
-// It is also what FriendlyMessage renders, so its templates must keep producing
-// exactly the sentences that method has always returned —
-// TestEnUSMatchesFriendlyMessage holds that line.
+// Its wording is pinned by TestEnUSExactWording, one case per error code plus
+// one per conditional split inside a code. Those sentences reach API responses,
+// so rephrasing one is a visible change and the test makes it a deliberate one.
 var EnUS = &Catalog{
 	Messages: map[ErrorCode]Message{
 		CodeRequiredMissing: {Template: "{field} is required"},
@@ -434,30 +434,6 @@ func (r Result) LocalizedMessagesWith(l Localizer) []string {
 		out[i] = l.Localize(e)
 	}
 	return out
-}
-
-// FriendlyMessage renders a user-facing sentence for the error.
-//
-// Message and FriendlyMessage are both always available, which is deliberate:
-// a service typically logs the raw diagnostic and renders the friendly one, and
-// needing both at once is the common case rather than a mode to switch between.
-//
-//	log.Warn(e.Message)              // raw CUE/Bloblang wording
-//	json.Encode(e.FriendlyMessage()) // user-facing text
-//
-// The text is always English. It is EnUS.Localize(e), and there is no way to
-// change that through this method — an error carries no locale, and adding one
-// would put a translation decision inside a serialised DTO. For any other
-// language, render the error with a Localizer instead:
-//
-//	msg := myCatalog.Localize(e)          // one error
-//	msgs := result.LocalizedMessages()    // whole result
-//
-// A custom ErrorFormatter replaces Message entirely; FriendlyMessage is derived
-// from the structured fields (Code, Path, FieldType, EnumOptions, Bound,
-// Suggestion) and therefore stays stable regardless of formatter configuration.
-func (e ValidationError) FriendlyMessage() string {
-	return EnUS.Localize(e)
 }
 
 // enumOptionsFromDetail lifts the candidate list out of an enum detail such as

@@ -80,7 +80,7 @@ graph TD
   - [本地化](#本地化)
     - [覆盖部分消息](#覆盖部分消息)
     - [接入已有的 i18n 体系](#接入已有的-i18n-体系)
-    - [两件它不会改变的事](#两件它不会改变的事)
+    - [一件它不会改变的事](#一件它不会改变的事)
   - [自定义错误消息](#自定义错误消息)
   - [Schema 组合](#schema-组合)
   - [Schema 自省](#schema-自省)
@@ -107,7 +107,7 @@ graph TD
 | **自定义函数** | 注册自有函数/方法，与 Bloblang API 完全一致（V1 & V2 风格） |
 | **字段控制** | 优先级分组、条件必填/跳过、忽略空值、单字段快速失败 |
 | **执行策略** | 三种 FailMode —— 收集所有 / 首个即停 / 优先级组隔离 |
-| **性能** | 预编译描述符；纯标量 schema **382 ns 完成校验且零分配** —— `cue.Context.Encode` 被完全跳过 |
+| **性能** | 预编译描述符；纯标量 schema **382 ns 完成校验且零分配**；含 `@blob()` 规则的 schema 凭借编译期类型检查从 81 次分配降至 **17 次** |
 | **可观测性** | `MetricsRecorder` 钩子 + OpenTelemetry 追踪；开箱可用的 `schemixprom` / `schemixotel` recorder |
 | **错误处理** | 结构化错误码、链式 API（HasCode/ErrorsByCode/ErrorsByType） |
 | **本地化** | `Localizer` 接口 + 内置 `EnUS` / `ZhCN` 目录；支持按请求选择语言 |
@@ -257,10 +257,10 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    // 把原始字节交给 ProcessValue，JSON 数字才能作为整数抵达 `int` 字段。
+    // 把原始字节交给 Process，JSON 数字才能作为整数抵达 `int` 字段。
     // 先 decode 成 map[string]any 会让所有数字变成 float64，而 CUE 的 `int`
     // 不接受 float —— 见下方说明。
-    r := userSchema.ProcessValue(raw) // FailAll：收集全部错误
+    r := userSchema.Process(raw) // FailAll：收集全部错误
     if !r.Valid {
         // 完全不是 JSON 的请求体在转换层就失败了。这与「某个字段违反规则」
         // 是两类不同的问题，应该给 400。
@@ -312,11 +312,14 @@ func catalogFor(header string) schemix.Localizer {
 无法解析的请求体是 `400`；格式正确但内容不符合 schema 是 `422`。
 `HasCode` 用来区分这两者。
 
-> **传给 `ProcessValue` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
+> **传给 `Process` 的应该是字节，不是 decode 后的 map。** `json.Unmarshal`
 > 会把所有 JSON 数字变成 `float64`，而 CUE 中 `int` 与 `float` 是平行类型，
 > 所以 `age: int & >=13 & <=150` 会以 `E1T01` 拒绝 decode 出来的 `28`。
-> `ProcessValue` 会在数值允许的前提下把 JSON 数字转成整数。
+> `Process` 会在数值允许的前提下把 JSON 数字转成整数。
 > （`json.Decoder.UseNumber()` 也没用 —— `json.Number` 本质是字符串。）
+
+> **`Process` 接受 `map[string]any`、struct、`*struct`、JSON 字节或 `Processable`。**
+> 其他类型以 `E0C01` 失败，且消息会同时给出收到的类型与全部可接受的类型。
 
 > **CUE 能表达的约束不要写成 `@blob`。** `age: int & >=13 & <=150` 失败时给出
 > `E1R01` 和 `age must be <=150`；同样的边界写成
@@ -563,7 +566,7 @@ r.Err()                              // 合并后的 error（合法时为 nil）
 r.FirstError()                       // *ValidationError
 r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
-r.ErrorsByType("cue")                // []ValidationError —— 按层过滤
+r.ErrorsByType(schemix.TypeCUE)      // []ValidationError —— 按层过滤
 r.HasCode(schemix.CodeBizRuleFailed) // bool —— 快速分类判断
 r.HasErrorsAt("email")               // bool —— 字段级判断
 ```
@@ -588,7 +591,7 @@ r := v.Process(map[string]any{"currency": "USE"}) // schema: "CNY" | "USD" | "EU
 
 r.Errors[0].Message           // value "USE" not in enum ["CNY", "USD", "EUR"]
 r.Errors[0].Suggestion        // USD
-r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+schemix.EnUS.Localize(r.Errors[0]) // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 ```
 
 > `Suggestion` 只对枚举填充。范围或正则违规没有可以合理猜测的值，
@@ -611,7 +614,7 @@ r.LocalizedMessages()
 
 ```go
 func handle(w http.ResponseWriter, req *http.Request) {
-    r := userSchema.ProcessValue(body)
+    r := userSchema.Process(body)
     if !r.Valid {
         msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
         respond(w, 422, map[string]any{"errors": msgs})
@@ -685,11 +688,21 @@ v := schemix.MustNew(schema, schemix.WithLocalizer(myLocalizer{lang: "fr"}))
 实现必须：永不返回空字符串（调用方会无条件渲染）、不包含被拒绝的值、
 保持纯函数（同一条错误要能同时渲染成两种语言）。
 
-### 两件它不会改变的事
+### 一件它不会改变的事
 
-`ValidationError.FriendlyMessage()` **始终是英文**。错误本身不携带 locale，
-给它加上 locale 等于把翻译决策塞进一个会被序列化进 API 响应的结构体。
-它仍然适合写日志、以及单语言服务；其他场景请用 `LocalizedMessages()`。
+错误本身不携带 locale。`ValidationError` 是可序列化的 DTO，所以渲染语言始终是
+调用点的决定 —— 要么经由知道默认语言的 `Result`，要么显式指定 catalog：
+
+```go
+schemix.EnUS.Localize(e)   // 单条错误，明确用英文
+```
+
+用 `v.Localizer()` 读回验证器的默认语言，未设置时报告 `EnUS` ——
+那正是未配置的验证器实际渲染所用的语言：
+
+```go
+msg := v.Localizer().Localize(err)
+```
 
 `Validate` 系列方法**没有默认语言**，因为它返回 `(bool, []ValidationError)`，
 没有 `Result` 来承载默认值。这条路径上请显式本地化：
@@ -776,6 +789,27 @@ for _, f := range fields {
 }
 ```
 
+每个 `FieldInfo` 同时携带 CUE 形状与 `@meta()` 控制项：
+
+| 字段 | 含义 |
+|------|------|
+| `Name` / `Path` | 字段名与完整点路径 |
+| `Type` | `string`、`int`、`float`、`bool`、`struct`、`list`、`number` |
+| `Optional` | 声明了 `?` 或 `@meta(optional)` |
+| `HasBlob` | 带有 `@blob()` 注解 |
+| `Children` | 嵌套结构字段 |
+| `Priority` | 来自 `@meta(priority=N)` |
+| `RequiredIf` / `SkipIf` | `@meta(required_if=…)` / `@meta(skip_if=…)` 的原始表达式文本 |
+| `Conditional` | 声明的是 `@meta(conditional)` 而非普通 `optional` |
+| `OmitEmpty` | 来自 `@meta(omit_empty)` |
+
+`RequiredIf` 正是让生成的表单能表达「该字段在特定条件下必填」的依据 ——
+仅靠 `Optional` 无法表达这一点，而这恰是该注解存在的意义。
+
+> **仅带 `@meta(priority=N)` 的字段，`Priority` 报告为 0。** priority 用于排定规则
+> 执行顺序，而一个既无 `@blob()` 又无条件/省略控制的字段没有规则可排，
+> 因此它不会被记录为规则节点。
+
 ## FailMode 模式
 
 | 模式 | 适用场景 | 行为 |
@@ -784,11 +818,19 @@ for _, f := range fields {
 | `FailFast` | API 网关 | 遇到第一个错误即停 |
 | `FailPriority` | 分层校验 | 收集首个失败优先级组内的 CUE + Blob 错误，并跳过更高组 |
 
+`FailMode` 本身就是 `CallOption`，因此按次调用选择 —— 一份编译好的 schema
+可同时服务于策略不同的调用方：
+
 ```go
-r := v.ProcessWithMode(data, schemix.FailFast)     // 最多 1 个错误
-r := v.ProcessWithMode(data, schemix.FailAll)      // 所有错误
-r := v.ProcessWithMode(data, schemix.FailPriority) // 仅首个失败组
+r := v.Process(data)                        // FailAll —— 默认
+r := v.Process(data, schemix.FailFast)      // 最多 1 个错误
+r := v.Process(data, schemix.FailPriority)  // 仅首个失败组
+
+valid, errs := v.Validate(data, schemix.FailFast)  // Validate 同样支持
 ```
+
+> 传入多个选项时以最后一个为准。`FailMode` 无法由任意数字构造，
+> 因此传入的 mode 必然是三者之一。
 
 > **处理契约：** 同一 `FailPriority` 组内的 CUE 与 Blob 规则都会执行并收集错误；
 > 该组失败后，不再执行更高优先级编号的组。任何无效结果均满足 `Output == nil`。
@@ -847,6 +889,9 @@ let r = process_schema(data: this.payload, name: "payment")
 ```go
 reg := schemix.NewRegistry()       // 内部共享 CUE context
 reg.Register("user", cueSrc)       // 编译 + 存储
+reg.Register("payment", cueSrc,    // 构造 option 会被转发
+    schemix.WithMethod("is_allowed_bin", fn))
+reg.Put("composed", v)             // 存入已构造好的 Validator
 reg.Has("user")                    // true
 reg.List()                         // ["user"]，按字母序排序
 reg.Len()                          // 1
@@ -858,10 +903,8 @@ reg.RegisterAllTo(env)             // 注册 method + function 到指定 env
 reg.RegisterMethodsTo(env)         // 仅 method 形式到指定 env
 reg.RegisterFunctionsTo(env)       // 仅 function 形式到指定 env
 
-// 已废弃的全局注册（使用 GlobalEnvironment；重复注册会返回错误）
-reg.RegisterAll()                  // 注册 method + function 两种形式
-reg.RegisterMethods()              // 仅 method 形式：this.validate_schema(...) / this.process_schema(...)
-reg.RegisterFunctions()            // 仅 function 形式：validate_schema(data: ...) / process_schema(data: ...)
+// 一个环境只能被一个 Registry 占用；第二次占用会返回错误，
+// 而不是静默覆盖前一次注册。
 ```
 
 ## 可观测性
@@ -973,13 +1016,15 @@ funcs.Err()                                      // 首个校验错误（valid �
 
 // 纯校验（快速路径 — 不分配 Output）
 valid, errs := v.Validate(data)
+valid, errs = v.Validate(data, schemix.FailFast)  // FailMode 即 CallOption
 
 // 处理（校验 + 计算字段）
 r := v.Process(data)
-r := v.ProcessWithMode(data, schemix.FailFast)
+r := v.Process(data, schemix.FailFast)
 
 // 自省
 fields := v.Fields()                             // []FieldInfo
+loc := v.Localizer()                             // 配置的默认值（未设置则为 EnUS）
 ```
 
 ## 性能基准
@@ -988,25 +1033,25 @@ Apple M4, Go 1.25.11 — 6 字段（3 CUE + 3 @blob）：
 
 | 操作 | 耗时 | 内存 | 分配次数 |
 |------|------|------|----------|
-| `New`（编译） | 431 µs | 796 KiB | 22380 |
-| `Process`（合法） | **4.67 µs** | 11.90 KiB | 86 |
-| `Process`（非法） | 5.59 µs | 13.14 KiB | 102 |
-| `Process`（嵌套） | 26.51 µs | 42.07 KiB | 420 |
-| `Validate`（无输出） | **4.82 µs** | 11.54 KiB | 82 |
-| `Process`（并行，10 核） | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields`（快速路径） | 149.0 ns | 0 B | 0 |
-| `Validate`（3 个标量列表，各 1 元素） | **72.9 ns** | 0 B | 0 |
-| `Validate`（3 个标量列表，各 10 元素） | **338 ns** | 0 B | 0 |
-| `Registry.Get` | 6.25 ns | 0 B | 0 |
+| `New`（编译） | 433 µs | 811 KiB | 22422 |
+| `Process`（合法） | **696 ns** | 696 B | 17 |
+| `Process`（非法） | 1.55 µs | 2.04 KiB | 33 |
+| `Process`（嵌套） | 24.95 µs | 36.21 KiB | 382 |
+| `Validate`（无输出） | **541 ns** | 360 B | 15 |
+| `Process`（并行，10 核） | **274 ns** | 696 B | 17 |
+| `ValidateFields`（快速路径） | 147 ns | 0 B | 0 |
+| `Validate`（3 个标量列表，各 1 元素） | **75.8 ns** | 0 B | 0 |
+| `Validate`（3 个标量列表，各 10 元素） | **339 ns** | 0 B | 0 |
+| `Registry.Get` | 5.69 ns | 0 B | 0 |
 
 > 简单标量字段使用 Go 原生快速路径，完全绕过 CUE，
-> 相比 CUE 旧路径实现约 **172 倍加速**（149.0ns vs 25.62µs）。
+> 相比 CUE 旧路径实现约 **173 倍加速**（147ns vs 25.43µs）。
 >
 > `cue.Context.Encode` 现在是**惰性**的：如果 schema 的所有字段都由快速路径处理，
-> 输入数据根本不会被转换成 `cue.Value`。上表每一行相比早期版本少掉的正好是那 39 次分配
-> （`Process` 125 → 86，`Validate` 121 → 82）。含结构体的 schema 仍然需要该转换，
-> 这正是 `Process`（嵌套）测量的内容 —— 由于字段查找路径改为编译期构建而非每次调用
-> 重新解析，分配次数从 492 降到 420。
+> 输入数据根本不会被转换成 `cue.Value`。非 bool 的 `@blob()` 结果通过 Go 类型断言
+> 零代价完成类型检查，替代了 CUE Encode+Unify —— `Process` 的分配次数从 81 降至
+> **17 次**。含结构体的 schema 仍然需要该转换，这正是 `Process`（嵌套）测量的
+> 382 次分配。
 >
 > 元素为**标量**的列表同样由快速路径处理，零分配；元素为**结构体**的列表不是，
 > 详见[数组拆解](benchmarks/comparison/README.md#arrays-it-depends-on-the-element)。
@@ -1051,8 +1096,8 @@ Apple M4、Go 1.25.11，`benchstat` 中位数。每次操作的耗时 / 分配�
 
 这个头条数字有两条必须说清的边界：
 
-- 只要加入**一条 `@blob()` 或一个嵌套结构体**，输入就必须被编码成
-  `cue.Value`，成本上升一个数量级。
+- 只要加入**一个嵌套结构体**，输入就必须被编码成 `cue.Value`，成本上升一个数量级。
+  标量字段上的 `@blob()` 规则不再触发编码——只有 Bloblang 表达式本身会被执行。
 - **数组取决于元素是什么。** 元素为标量的列表 —— `[...string]`、
   `[...int & >0]`、`[..."A" | "B"]` —— 完全由快速路径处理，零分配。
   元素为**结构体**的列表（`[...{…}]`）没有对应的描述符，整个 list 交给

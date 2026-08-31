@@ -49,9 +49,10 @@ func ExampleValidator_Validate() {
 	// valid: false errors: 2
 }
 
-// ProcessValue accepts a struct, a pointer, JSON bytes, a Processable, or a
-// plain map — anything convertible to map[string]any.
-func ExampleValidator_ProcessValue() {
+// Process accepts a struct, a pointer, JSON bytes, a Processable, or a plain
+// map — anything convertible to map[string]any. Anything else fails with E0C01
+// naming the type it received.
+func ExampleValidator_Process_flexibleInput() {
 	v := schemix.MustNew(`{
 		order_id: =~"^ORD-[0-9]+$"
 		amount:   int & >0
@@ -60,21 +61,21 @@ func ExampleValidator_ProcessValue() {
 	}`)
 
 	// struct
-	fmt.Println("struct:  ", v.ProcessValue(Order{OrderID: "ORD-12345", Amount: 9900, Currency: "CNY"}).Valid)
+	fmt.Println("struct:  ", v.Process(Order{OrderID: "ORD-12345", Amount: 9900, Currency: "CNY"}).Valid)
 
 	// pointer to struct
-	fmt.Println("*struct: ", v.ProcessValue(&Order{OrderID: "ORD-99999", Amount: 500, Currency: "USD"}).Valid)
+	fmt.Println("*struct: ", v.Process(&Order{OrderID: "ORD-99999", Amount: 500, Currency: "USD"}).Valid)
 
 	// raw JSON bytes
-	fmt.Println("[]byte:  ", v.ProcessValue([]byte(`{"order_id":"ORD-1","amount":100,"currency":"EUR"}`)).Valid)
+	fmt.Println("[]byte:  ", v.Process([]byte(`{"order_id":"ORD-1","amount":100,"currency":"EUR"}`)).Valid)
 
 	// plain map
-	fmt.Println("map:     ", v.ProcessValue(map[string]any{
+	fmt.Println("map:     ", v.Process(map[string]any{
 		"order_id": "ORD-55555", "amount": int64(200), "currency": "CNY",
 	}).Valid)
 
 	// An unconvertible input fails with a config-layer error rather than panicking.
-	r := v.ProcessValue(42)
+	r := v.Process(42)
 	fmt.Println("int:     ", r.Valid, r.Errors[0].Code)
 	// Output:
 	// struct:   true
@@ -93,33 +94,9 @@ func ExampleProcessable() {
 		currency: "CNY" | "USD"
 	}`)
 
-	r := v.ProcessValue(Payment{PAN: "6222021234567890", Amount: 10000, Currency: "CNY"})
+	r := v.Process(Payment{PAN: "6222021234567890", Amount: 10000, Currency: "CNY"})
 	fmt.Println(r.Valid)
 	// Output: true
-}
-
-// ProcessStruct is the generic form; it reads better at call sites that already
-// have a concrete type.
-func ExampleProcessStruct() {
-	v := schemix.MustNew(`{
-		order_id: =~"^ORD-[0-9]+$"
-		amount:   int & >0
-		currency: "CNY" | "USD" | "EUR"
-	}`)
-
-	r := schemix.ProcessStruct(v, Order{OrderID: "ORD-77777", Amount: 3000, Currency: "USD"})
-	fmt.Println("valid:", r.Valid)
-
-	r = schemix.ProcessStructWithMode(v,
-		Order{OrderID: "BAD", Amount: -1, Currency: "XXX"}, schemix.FailAll)
-	fmt.Println("valid:", r.Valid, "errors:", len(r.Errors))
-
-	valid, _ := schemix.ValidateStruct(v, Order{OrderID: "ORD-88888", Amount: 1, Currency: "EUR"})
-	fmt.Println("valid:", valid)
-	// Output:
-	// valid: true
-	// valid: false errors: 3
-	// valid: true
 }
 
 // A realistic HTTP handler, mirroring the README's API Validation section so
@@ -131,11 +108,11 @@ func ExampleProcessStruct() {
 //     descriptor, and a violation names the bound it broke (E1R01, "must be
 //     <=150") instead of the shrug @blob gives (E2B01, "does not satisfy a
 //     validation rule").
-//   - ProcessValue receives the raw bytes. Decoding into map[string]any first
-//     turns every JSON number into a float64, which CUE's `int` rejects.
+//   - Process receives the raw bytes. Decoding into map[string]any first turns
+//     every JSON number into a float64, which CUE's `int` rejects.
 //   - A body that is not JSON fails at the conversion layer with E0C01, which is
 //     what separates a 400 from a 422.
-func ExampleValidator_ProcessValue_httpHandler() {
+func ExampleValidator_Process_httpHandler() {
 	userSchema := schemix.MustNew(`{
 		username: =~"^[a-zA-Z][a-zA-Z0-9_]{2,20}$"
 		age:      int & >=13 & <=150
@@ -169,7 +146,7 @@ func ExampleValidator_ProcessValue_httpHandler() {
 			return
 		}
 
-		r := userSchema.ProcessValue(raw)
+		r := userSchema.Process(raw)
 		if !r.Valid {
 			if r.HasCode(schemix.CodeConfigError) {
 				respond(w, http.StatusBadRequest, map[string]any{"error": "malformed_json"})

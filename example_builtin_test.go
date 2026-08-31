@@ -29,7 +29,7 @@ func ExampleNew_builtinFormatValidators() {
 		"mac":       "01:23:45:67:89:AB",
 		"cn_mobile": "13800138000",
 	}
-	fmt.Println("all valid:", v.ProcessWithMode(good, schemix.FailAll).Valid)
+	fmt.Println("all valid:", v.Process(good).Valid)
 
 	bad := map[string]any{
 		"email":     "invalid",
@@ -40,7 +40,7 @@ func ExampleNew_builtinFormatValidators() {
 		"mac":       "ZZ:ZZ:ZZ",
 		"cn_mobile": "12345",
 	}
-	r := v.ProcessWithMode(bad, schemix.FailAll)
+	r := v.Process(bad)
 	fmt.Println("failing fields:", len(r.Errors))
 	// Output:
 	// all valid: true
@@ -58,15 +58,15 @@ func ExampleNew_builtinLengthValidators() {
 		age:      int    @blob(this.age.between(min: 13, max: 150))
 	}`)
 
-	fmt.Println("valid:", v.ProcessWithMode(map[string]any{
+	fmt.Println("valid:", v.Process(map[string]any{
 		"code": "ABC123", "slug": "my-post_2024", "pin": "123456",
 		"password": "s3cret-passphrase", "age": int64(28),
-	}, schemix.FailAll).Valid)
+	}).Valid)
 
-	r := v.ProcessWithMode(map[string]any{
+	r := v.Process(map[string]any{
 		"code": "ABC 123", "slug": "has space", "pin": "12.34",
 		"password": "short", "age": int64(200),
-	}, schemix.FailAll)
+	})
 
 	paths := make([]string, 0, len(r.Errors))
 	for _, e := range r.Errors {
@@ -102,13 +102,13 @@ func ExampleNew_builtinFunctions() {
 		status:   string @blob(in_list(this.status, ["active", "pending"]))
 	}`)
 
-	fmt.Println("valid:", v.ProcessWithMode(map[string]any{
+	fmt.Println("valid:", v.Process(map[string]any{
 		"birthday": "1990-05-20", "expiry": "2999-01-01", "status": "active",
-	}, schemix.FailAll).Valid)
+	}).Valid)
 
-	r := v.ProcessWithMode(map[string]any{
+	r := v.Process(map[string]any{
 		"birthday": "2999-01-01", "expiry": "1990-05-20", "status": "deleted",
-	}, schemix.FailAll)
+	})
 	fmt.Println("failing:", len(r.Errors))
 	// Output:
 	// valid: true

@@ -1,6 +1,7 @@
 package schemix
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -692,5 +693,79 @@ func TestResultSizeStaysSmall(t *testing.T) {
 	if got := unsafe.Sizeof(Result{}); got != want {
 		t.Errorf("unsafe.Sizeof(Result{}) = %d, want %d — "+
 			"a wide field was added to a struct returned by value from every call", got, want)
+	}
+}
+
+// TestErrorTypeIsTyped covers P1-e: ErrorsByType takes a named type rather than
+// a bare string.
+//
+// The old signature let ErrorsByType("blob") compile and always return nil — the
+// correct value is "bloblang". That was a silent failure on the same Result whose
+// ErrorsByCode had type protection all along.
+func TestErrorTypeIsTyped(t *testing.T) {
+	v := MustNew(`{
+		age:  int & <=150
+		flag: bool @blob(this.age < 100)
+	}`)
+	r := v.Process(map[string]any{"age": int64(200), "flag": true})
+	if r.Valid {
+		t.Fatal("expected the input to fail")
+	}
+
+	t.Run("filters by layer", func(t *testing.T) {
+		if got := r.ErrorsByType(TypeCUE); len(got) == 0 {
+			t.Fatalf("ErrorsByType(TypeCUE) returned nothing; errors are %v", r.Errors)
+		}
+		if got := r.ErrorsByType(TypeMeta); len(got) != 0 {
+			t.Fatalf("ErrorsByType(TypeMeta) = %v, want none", got)
+		}
+	})
+
+	t.Run("the constants are ErrorType, not untyped strings", func(t *testing.T) {
+		// A compile-time assertion: were these still untyped constants, the
+		// declaration below would fail.
+		_ = ErrorType(TypeCUE)
+		_ = ErrorType(TypeBloblang)
+		_ = ErrorType(TypeMeta)
+		_ = ErrorType(TypeConfig)
+
+		if got := r.Errors[0].Type; got != TypeCUE && got != TypeBloblang {
+			t.Fatalf("Type = %q, want one of the declared ErrorType constants", got)
+		}
+	})
+}
+
+// TestValidationErrorJSONUnchanged locks the wire format. ErrorType's underlying
+// type is string, so making Type a named type must not alter a single byte of
+// what callers already parse.
+func TestValidationErrorJSONUnchanged(t *testing.T) {
+	e := ValidationError{
+		Code:        CodeEnumInvalid,
+		Path:        "currency",
+		Type:        TypeCUE,
+		FieldType:   "string",
+		Message:     `value "USE" not in enum ["CNY", "USD"]`,
+		Suggestion:  "USD",
+		EnumOptions: []string{"CNY", "USD"},
+	}
+	got, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `{"code":"E1E01","path":"currency","type":"cue","field_type":"string",` +
+		`"message":"value \"USE\" not in enum [\"CNY\", \"USD\"]",` +
+		`"suggestion":"USD","enum_options":["CNY","USD"]}`
+	if string(got) != want {
+		t.Errorf("ValidationError JSON changed:\n got  %s\n want %s", got, want)
+	}
+
+	// And it round-trips: a consumer unmarshalling into the struct still lands
+	// on the constant it can compare against.
+	var back ValidationError
+	if err := json.Unmarshal(got, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Type != TypeCUE {
+		t.Errorf("round-tripped Type = %q, want %q", back.Type, TypeCUE)
 	}
 }

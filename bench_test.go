@@ -104,19 +104,19 @@ func BenchmarkValidate_Valid(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessWithMode_FailFast(b *testing.B) {
+func BenchmarkProcess_FailFast(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(benchDataInvalid, FailFast)
+		v.Process(benchDataInvalid, FailFast)
 	}
 }
 
-func BenchmarkProcessWithMode_FailAll(b *testing.B) {
+func BenchmarkProcess_FailAll(b *testing.B) {
 	v := MustNew(benchSchema)
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(benchDataInvalid, FailAll)
+		v.Process(benchDataInvalid, FailAll)
 	}
 }
 
@@ -213,14 +213,14 @@ func BenchmarkProcess_Meta(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessWithMode_FailPriority(b *testing.B) {
+func BenchmarkProcess_FailPriority(b *testing.B) {
 	v := MustNew(benchMetaSchema)
 	bad := map[string]any{
 		"mti": "9999", "pan": "ABC", "amount": int64(-1), "currency": "999",
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		v.ProcessWithMode(bad, FailPriority)
+		v.Process(bad, FailPriority)
 	}
 }
 
@@ -359,7 +359,7 @@ func BenchmarkValidate_NoDeepCopy_Nested(b *testing.B) {
 }
 
 // BenchmarkLocalize measures message rendering, which is now a public API rather
-// than an implementation detail of FriendlyMessage: LocalizedMessages calls it
+// than an implementation detail of the catalog: LocalizedMessages calls it
 // once per error, so a form with twenty rejected fields pays it twenty times.
 //
 // It is off the validation hot path — nothing here runs unless a caller asks for

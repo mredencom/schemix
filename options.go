@@ -83,11 +83,9 @@ func WithErrorFormatter(f ErrorFormatter) Option {
 //
 //	msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
 //
-// Two limits are worth knowing before reaching for it. It does not change
-// ValidationError.FriendlyMessage, which is always English — an error carries no
-// locale, and the default travels on Result. And it does not reach the Validate
-// family, which returns errors without a Result; localize those explicitly with
-// Localizer.Localize.
+// One limit is worth knowing before reaching for it: it does not reach the
+// Validate family, which returns errors without a Result to carry the default.
+// Localize those explicitly with Localizer.Localize.
 //
 // A nil argument is ignored, leaving the English default.
 func WithLocalizer(l Localizer) Option {

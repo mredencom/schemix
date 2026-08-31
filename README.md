@@ -81,7 +81,7 @@ graph TD
   - [Localization](#localization)
     - [Overriding messages](#overriding-messages)
     - [Using an existing i18n pipeline](#using-an-existing-i18n-pipeline)
-    - [Two things it does not change](#two-things-it-does-not-change)
+    - [One thing it does not change](#one-thing-it-does-not-change)
   - [Custom Error Messages](#custom-error-messages)
   - [Schema Composition](#schema-composition)
   - [Schema Introspection](#schema-introspection)
@@ -108,7 +108,7 @@ graph TD
 | **Custom Functions** | Register your own functions/methods with Bloblang-compatible API (V1 & V2 styles) |
 | **Field Control** | Priority groups, conditional required/skip, omit empty, fail-fast per field |
 | **Execution** | Three FailModes — collect all / stop at first / priority-group isolation |
-| **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations** — `cue.Context.Encode` is skipped entirely |
+| **Performance** | Pre-compiled descriptors; scalar-only schemas validate in **382 ns with zero allocations**; schemas with `@blob()` rules drop from 81 to **17 allocations** thanks to compile-time type checking |
 | **Observability** | `MetricsRecorder` hooks + OpenTelemetry tracing; ready-made `schemixprom` / `schemixotel` recorders |
 | **Error Handling** | Structured codes, chain API (HasCode/ErrorsByCode/ErrorsByType) |
 | **Localization** | `Localizer` interface + built-in `EnUS` / `ZhCN` catalogs; per-request language selection |
@@ -258,10 +258,10 @@ func CreateUser(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    // Hand ProcessValue the raw bytes so a JSON number reaches an `int` field as
-    // an integer. Decoding into map[string]any first makes every number a
-    // float64, and CUE's `int` rejects a float — see the note below.
-    r := userSchema.ProcessValue(raw) // FailAll: collects every error
+    // Hand Process the raw bytes so a JSON number reaches an `int` field as an
+    // integer. Decoding into map[string]any first makes every number a float64,
+    // and CUE's `int` rejects a float — see the note below.
+    r := userSchema.Process(raw) // FailAll: collects every error
     if !r.Valid {
         // A body that is not JSON at all fails at the conversion layer. That is
         // a different problem from a field that broke a rule, and deserves 400.
@@ -314,11 +314,15 @@ func catalogFor(header string) schemix.Localizer {
 A body that could not be parsed is a `400`; a well-formed body whose contents
 break the schema is a `422`. `HasCode` separates the two.
 
-> **Give `ProcessValue` the bytes, not a decoded map.** `json.Unmarshal` turns
-> every JSON number into a `float64`, and CUE keeps `int` and `float` as sibling
-> types, so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`.
-> `ProcessValue` converts JSON numbers to integers where the value allows it.
+> **Give `Process` the bytes, not a decoded map.** `json.Unmarshal` turns every
+> JSON number into a `float64`, and CUE keeps `int` and `float` as sibling types,
+> so `age: int & >=13 & <=150` rejects a decoded `28` with `E1T01`. `Process`
+> converts JSON numbers to integers where the value allows it.
 > (`json.Decoder.UseNumber()` does not help — a `json.Number` is a string.)
+
+> **`Process` accepts a `map[string]any`, a struct, a `*struct`, JSON bytes, or a
+> `Processable`.** Anything else fails with `E0C01`, and the message names the
+> type it received alongside the ones it accepts.
 
 > **Prefer CUE over `@blob` for anything CUE can state.** `age: int & >=13 & <=150`
 > fails with `E1R01` and `age must be <=150`; the same bound written as
@@ -577,7 +581,7 @@ r.Err()                              // combined error (nil if valid)
 r.FirstError()                       // *ValidationError
 r.ErrorsByPath("pan")                // []ValidationError
 r.ErrorsByCode(schemix.CodeTypeMismatch) // []ValidationError
-r.ErrorsByType("cue")                // []ValidationError — filter by layer
+r.ErrorsByType(schemix.TypeCUE)      // []ValidationError — filter by layer
 r.HasCode(schemix.CodeBizRuleFailed) // bool — quick category check
 r.HasErrorsAt("email")               // bool — field-level check
 ```
@@ -602,7 +606,7 @@ r := v.Process(map[string]any{"currency": "USE"}) // schema: "CNY" | "USD" | "EU
 
 r.Errors[0].Message           // value "USE" not in enum ["CNY", "USD", "EUR"]
 r.Errors[0].Suggestion        // USD
-r.Errors[0].FriendlyMessage() // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+schemix.EnUS.Localize(r.Errors[0]) // currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 ```
 
 > `Suggestion` is populated for enums only. A range or regex violation has no
@@ -626,7 +630,7 @@ concurrently** — the language is not baked in at construction:
 
 ```go
 func handle(w http.ResponseWriter, req *http.Request) {
-    r := userSchema.ProcessValue(body)
+    r := userSchema.Process(body)
     if !r.Valid {
         msgs := r.LocalizedMessagesWith(catalogFor(req.Header.Get("Accept-Language")))
         respond(w, 422, map[string]any{"errors": msgs})
@@ -702,12 +706,23 @@ An implementation must never return an empty string (callers render it
 unconditionally), must not include the offending value, and must stay pure so
 the same error can be rendered in two languages at once.
 
-### Two things it does not change
+### One thing it does not change
 
-`ValidationError.FriendlyMessage()` is **always English**. An error carries no
-locale, and giving it one would put a translation decision inside a struct that
-gets serialised into API responses. It remains the right choice for a log line
-and for a single-language service; use `LocalizedMessages()` otherwise.
+An error carries no locale of its own. `ValidationError` is a serialisable DTO,
+so rendering is always a decision made at the call site — either through a
+`Result` that knows the configured language, or by naming a catalog:
+
+```go
+schemix.EnUS.Localize(e)   // one error, explicitly English
+```
+
+Read back what a validator defaults to with `v.Localizer()`, which reports
+`EnUS` when none was set — that being what an unconfigured validator actually
+renders with:
+
+```go
+msg := v.Localizer().Localize(err)
+```
 
 The `Validate` family gets **no default language**, because it returns
 `(bool, []ValidationError)` with no `Result` to carry one. Localize explicitly:
@@ -797,6 +812,28 @@ for _, f := range fields {
 }
 ```
 
+Each `FieldInfo` carries the CUE shape alongside the `@meta()` controls:
+
+| Field | Meaning |
+|-------|---------|
+| `Name` / `Path` | Field name and full dot-path |
+| `Type` | `string`, `int`, `float`, `bool`, `struct`, `list`, `number` |
+| `Optional` | Declared with `?` or `@meta(optional)` |
+| `HasBlob` | Carries an `@blob()` annotation |
+| `Children` | Nested struct fields |
+| `Priority` | From `@meta(priority=N)` |
+| `RequiredIf` / `SkipIf` | Raw expression text from `@meta(required_if=…)` / `@meta(skip_if=…)` |
+| `Conditional` | Declared `@meta(conditional)` rather than plain `optional` |
+| `OmitEmpty` | From `@meta(omit_empty)` |
+
+`RequiredIf` is what lets a generated form state that a field is required **under
+a condition** rather than merely optional — `Optional` alone cannot express that,
+which was the point of the annotation.
+
+> **A field carrying only `@meta(priority=N)` reports `Priority: 0`.** Priority
+> orders rule execution, and a field with no `@blob()` and no conditional or omit
+> control has no rules to order, so it is never recorded as a rule node.
+
 ## FailMode
 
 | Mode | Best For | Behavior |
@@ -805,11 +842,19 @@ for _, f := range fields {
 | `FailFast` | API gateway | Stop at first error |
 | `FailPriority` | Layered validation | Collect CUE + Blob errors in the first failing priority group; skip higher groups |
 
+A `FailMode` is a `CallOption`, so it is chosen per call — one compiled schema
+serves callers wanting different strategies:
+
 ```go
-r := v.ProcessWithMode(data, schemix.FailFast)     // 1 error max
-r := v.ProcessWithMode(data, schemix.FailAll)      // all errors
-r := v.ProcessWithMode(data, schemix.FailPriority) // first failing group only
+r := v.Process(data)                        // FailAll — the default
+r := v.Process(data, schemix.FailFast)      // 1 error max
+r := v.Process(data, schemix.FailPriority)  // first failing group only
+
+valid, errs := v.Validate(data, schemix.FailFast)  // Validate takes one too
 ```
+
+> When several options are given the last wins. A `FailMode` cannot be
+> constructed from an arbitrary number, so a mode is always one of the three.
 
 > **Processing contracts:** CUE and Blob rules in the same `FailPriority` group are both evaluated.
 > Once that group fails, higher-priority-number groups do not run. Any invalid result has
@@ -869,6 +914,9 @@ let r = process_schema(data: this.payload, name: "payment")
 ```go
 reg := schemix.NewRegistry()       // shared CUE context internally
 reg.Register("user", cueSrc)       // compile + store
+reg.Register("payment", cueSrc,    // construction options are forwarded
+    schemix.WithMethod("is_allowed_bin", fn))
+reg.Put("composed", v)             // file an already-built Validator
 reg.Has("user")                    // true
 reg.List()                         // ["user"] — sorted
 reg.Len()                          // 1
@@ -880,10 +928,8 @@ reg.RegisterAllTo(env)             // register both method + function forms into
 reg.RegisterMethodsTo(env)         // method form only into env
 reg.RegisterFunctionsTo(env)       // function form only into env
 
-// Deprecated global registration (uses GlobalEnvironment; repeated registration returns an error)
-reg.RegisterAll()                  // register both method + function forms
-reg.RegisterMethods()              // method form only: this.validate_schema(...) / this.process_schema(...)
-reg.RegisterFunctions()            // function form only: validate_schema(data: ...) / process_schema(data: ...)
+// An environment may be claimed by one Registry only; a second claim returns an
+// error rather than silently overwriting the first registration.
 ```
 
 ## Observability
@@ -996,13 +1042,15 @@ funcs.Err()                                      // first validation error (nil 
 
 // Validation (fast path — no Output allocation)
 valid, errs := v.Validate(data)
+valid, errs = v.Validate(data, schemix.FailFast)  // FailMode is a CallOption
 
 // Processing (validation + computed fields)
 r := v.Process(data)
-r := v.ProcessWithMode(data, schemix.FailFast)
+r := v.Process(data, schemix.FailFast)
 
 // Introspection
 fields := v.Fields()                             // []FieldInfo
+loc := v.Localizer()                             // configured default (EnUS if unset)
 ```
 
 ## Benchmarks
@@ -1011,27 +1059,26 @@ Apple M4, Go 1.25.11 — 6 fields (3 CUE + 3 @blob):
 
 | Operation | Time | Memory | Allocs |
 |-----------|------|--------|--------|
-| `New` (compile) | 431 µs | 796 KiB | 22380 |
-| `Process` (valid) | **4.67 µs** | 11.90 KiB | 86 |
-| `Process` (invalid) | 5.59 µs | 13.14 KiB | 102 |
-| `Process` (nested) | 26.51 µs | 42.07 KiB | 420 |
-| `Validate` (no output) | **4.82 µs** | 11.54 KiB | 82 |
-| `Process` (parallel, 10 cores) | **4.20 µs** | 11.90 KiB | 86 |
-| `ValidateFields` (fast path) | 149.0 ns | 0 B | 0 |
-| `Validate` (3 scalar lists, 1 element each) | **72.9 ns** | 0 B | 0 |
-| `Validate` (3 scalar lists, 10 elements each) | **338 ns** | 0 B | 0 |
-| `Registry.Get` | 6.25 ns | 0 B | 0 |
+| `New` (compile) | 433 µs | 811 KiB | 22422 |
+| `Process` (valid) | **696 ns** | 696 B | 17 |
+| `Process` (invalid) | 1.55 µs | 2.04 KiB | 33 |
+| `Process` (nested) | 24.95 µs | 36.21 KiB | 382 |
+| `Validate` (no output) | **541 ns** | 360 B | 15 |
+| `Process` (parallel, 10 cores) | **274 ns** | 696 B | 17 |
+| `ValidateFields` (fast path) | 147 ns | 0 B | 0 |
+| `Validate` (3 scalar lists, 1 element each) | **75.8 ns** | 0 B | 0 |
+| `Validate` (3 scalar lists, 10 elements each) | **339 ns** | 0 B | 0 |
+| `Registry.Get` | 5.69 ns | 0 B | 0 |
 
 > Simple scalar fields use a Go-native fast path that bypasses CUE entirely,
-> achieving about **172x speedup** over the CUE legacy path (149.0ns vs 25.62µs).
+> achieving about **173x speedup** over the CUE legacy path (147ns vs 25.43µs).
 >
 > `cue.Context.Encode` is **lazy**: a schema whose fields are all served by the
-> fast path never converts the input into a `cue.Value` at all. That is exactly
-> the 39 allocations missing from every row above compared to earlier releases
-> (`Process` 125 → 86, `Validate` 121 → 82). A schema containing a struct still
-> requires the encode, which is what `Process (nested)` measures — down from 492
-> to 420 allocations now that field lookup paths are built at compile time rather
-> than parsed on every call.
+> fast path never converts the input into a `cue.Value` at all. Non-bool `@blob()`
+> results are type-checked via a Go type switch at zero cost instead of
+> CUE Encode+Unify — bringing `Process` from 81 down to **17 allocations**.
+> A schema containing a struct still requires the encode, which is what
+> `Process (nested)` measures at 382 allocations.
 >
 > Lists of **scalar** elements are served by the fast path too, allocation-free.
 > Lists of **struct** elements are not; see
@@ -1078,8 +1125,9 @@ is skipped entirely when every field is served by the Go-native fast path.
 
 Two honest boundaries on that headline:
 
-- Add **one `@blob()` rule or a nested struct** and the input must be encoded
-  into a `cue.Value` — cost jumps by an order of magnitude.
+- Add **a nested struct** and the input must be encoded into a `cue.Value` —
+  cost jumps by an order of magnitude. A `@blob()` rule on a scalar field no
+  longer triggers the encode; only its Bloblang expression is evaluated.
 - **Arrays depend on what the elements are.** A list of scalars —
   `[...string]`, `[...int & >0]`, `[..."A" | "B"]` — is served entirely by the
   fast path, allocation-free. A list of **structs** (`[...{…}]`) has no such

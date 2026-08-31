@@ -499,7 +499,7 @@ func TestListFastpath_ReportsEveryOffendingElement(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := MustNew(tc.schema).ProcessWithMode(tc.input, FailAll)
+			got := MustNew(tc.schema).Process(tc.input, FailAll)
 			if got.Valid {
 				t.Fatal("expected invalid")
 			}
@@ -586,7 +586,7 @@ func TestListFastpath_FallsBackWhenAnElementIsUnrepresentable(t *testing.T) {
 	const schema = `{ n: [...int & >0] }`
 	input := map[string]any{"n": []any{int64(1), uint64(2), int64(-3)}}
 
-	got := MustNew(schema).ProcessWithMode(input, FailAll)
+	got := MustNew(schema).Process(input, FailAll)
 	want := processCUEOnly(t, schema, input)
 
 	if got.Valid != want.Valid {

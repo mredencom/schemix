@@ -50,8 +50,7 @@ type TestCase struct {
 	// Name is the subtest name, passed to t.Run.
 	Name string
 
-	// Input is the data passed to Validator.Process (or ProcessWithMode when
-	// Mode is set).
+	// Input is the data passed to Validator.Process.
 	Input map[string]any
 
 	// Mode selects the FailMode used for this case. Zero value is
@@ -109,7 +108,7 @@ func Test(t *testing.T, v *root.Validator, cases []TestCase) {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Helper()
-			result := v.ProcessWithMode(tc.Input, tc.Mode)
+			result := v.Process(tc.Input, tc.Mode)
 			assertResult(t, tc, result)
 		})
 	}

@@ -1,6 +1,12 @@
 package schemix
 
 import (
+	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -138,4 +144,237 @@ func TestValidate_OriginalDataUnmodified(t *testing.T) {
 	if _, exists := data["upper"]; exists {
 		t.Errorf("Validate() should not inject computed fields into input data")
 	}
+}
+
+// TestDeprecatedMarkersPointSomewhere guards the quality of any future
+// deprecation: a bare "Deprecated:" tells a caller to stop without saying what
+// to use, which is worse than no marker at all because it offers no way
+// forward.
+//
+// The package currently has none — every symbol marked during the v0.2.x cycle
+// has since been removed. The check stays because the next one will need it.
+func TestDeprecatedMarkersPointSomewhere(t *testing.T) {
+	for name, doc := range exportedFuncDocs(t) {
+		_, after, found := strings.Cut(doc, "Deprecated:")
+		if !found {
+			continue
+		}
+		if len(strings.Fields(after)) < 3 {
+			t.Errorf("%s: Deprecated marker has no usable replacement text: %q",
+				name, strings.TrimSpace(after))
+		}
+	}
+}
+
+// exportedFuncDocs maps exported function and method names to their doc
+// comments. Methods are keyed "Receiver.Name", package functions by bare name.
+func exportedFuncDocs(t *testing.T) map[string]string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+
+	docs := make(map[string]string)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !fn.Name.IsExported() {
+				continue
+			}
+			docs[funcKey(fn)] = fn.Doc.Text()
+		}
+	}
+	if len(docs) == 0 {
+		t.Fatal("parsed no exported functions; the parser filter is wrong")
+	}
+	return docs
+}
+
+// funcKey renders "Receiver.Name" for methods and "Name" for functions.
+func funcKey(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	typ := fn.Recv.List[0].Type
+	if star, ok := typ.(*ast.StarExpr); ok {
+		typ = star.X
+	}
+	if ident, ok := typ.(*ast.Ident); ok {
+		return ident.Name + "." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
+// TestCallOption covers the per-call option added ahead of the P1 reshape.
+//
+// It lands in P0 because the Deprecated markers have to point at something that
+// actually exists: without it there is no non-deprecated way to pass a FailMode,
+// and schemix/testing — a separate package — cannot reach an unexported helper.
+// Adding a variadic parameter keeps every existing call compiling.
+func TestCallOption(t *testing.T) {
+	const schema = `{
+		a: int & >0
+		b: int & >0
+	}`
+	bothBad := map[string]any{"a": int64(-1), "b": int64(-1)}
+
+	t.Run("existing calls keep working", func(t *testing.T) {
+		v := MustNew(schema)
+		if r := v.Process(map[string]any{"a": int64(1), "b": int64(1)}); !r.Valid {
+			t.Fatalf("Process without options: valid = false, errors = %v", r.Errors)
+		}
+		if valid, errs := v.Validate(map[string]any{"a": int64(1), "b": int64(1)}); !valid {
+			t.Fatalf("Validate without options: valid = false, errors = %v", errs)
+		}
+	})
+
+	t.Run("FailMode is itself a CallOption", func(t *testing.T) {
+		// No wrapper function: the mode constant is passed directly.
+		v := MustNew(schema)
+		r := v.Process(bothBad, FailFast)
+		if len(r.Errors) != 1 {
+			t.Fatalf("errors = %d, want 1 under FailFast: %v", len(r.Errors), r.Errors)
+		}
+	})
+
+	t.Run("Validate accepts a mode", func(t *testing.T) {
+		// Previously impossible: the Validate family hardcoded FailAll, so
+		// callers wanting fail-fast had to pay for Output they discarded.
+		v := MustNew(schema)
+		_, errs := v.Validate(bothBad, FailFast)
+		if len(errs) != 1 {
+			t.Fatalf("errors = %d, want 1 under FailFast: %v", len(errs), errs)
+		}
+		_, all := v.Validate(bothBad, FailAll)
+		if len(all) != 2 {
+			t.Fatalf("errors = %d, want 2 under FailAll: %v", len(all), all)
+		}
+	})
+
+	t.Run("context variants accept a mode", func(t *testing.T) {
+		v := MustNew(schema)
+		if r := v.ProcessContext(context.Background(), bothBad, FailFast); len(r.Errors) != 1 {
+			t.Fatalf("ProcessContext errors = %d, want 1", len(r.Errors))
+		}
+		if _, errs := v.ValidateContext(context.Background(), bothBad, FailFast); len(errs) != 1 {
+			t.Fatalf("ValidateContext errors = %d, want 1", len(errs))
+		}
+	})
+
+	t.Run("the last option wins", func(t *testing.T) {
+		// Standard functional-option semantics, worth pinning because a mode is
+		// a scalar and callers may reasonably expect the first to stick.
+		v := MustNew(schema)
+		r := v.Process(bothBad, FailAll, FailFast)
+		if len(r.Errors) != 1 {
+			t.Fatalf("errors = %d, want 1: the last option must win", len(r.Errors))
+		}
+	})
+}
+
+// TestProcessAcceptsEveryInputType covers P1-A: the four entry points take any
+// supported input, which is what let the eight map/any × mode × ctx variants
+// go away.
+func TestProcessAcceptsEveryInputType(t *testing.T) {
+	v := MustNew(`{
+		order_id: =~"^ORD-[0-9]+$"
+		amount:   int & >0
+	}`)
+
+	cases := []struct {
+		name string
+		in   any
+	}{
+		{"map", map[string]any{"order_id": "ORD-1", "amount": int64(100)}},
+		{"struct", valueOrder{OrderID: "ORD-2", Amount: 200}},
+		{"struct pointer", &valueOrder{OrderID: "ORD-3", Amount: 300}},
+		{"JSON bytes", []byte(`{"order_id":"ORD-4","amount":400}`)},
+		{"Processable", processableOrder{id: "ORD-5", amount: 500}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if r := v.Process(tc.in); !r.Valid {
+				t.Fatalf("Process: valid = false, errors = %v", r.Errors)
+			}
+			if valid, errs := v.Validate(tc.in); !valid {
+				t.Fatalf("Validate: valid = false, errors = %v", errs)
+			}
+			ctx := context.Background()
+			if r := v.ProcessContext(ctx, tc.in); !r.Valid {
+				t.Fatalf("ProcessContext: valid = false, errors = %v", r.Errors)
+			}
+			if valid, errs := v.ValidateContext(ctx, tc.in); !valid {
+				t.Fatalf("ValidateContext: valid = false, errors = %v", errs)
+			}
+		})
+	}
+
+	t.Run("with a CallOption", func(t *testing.T) {
+		bad := []byte(`{"order_id":"NOPE","amount":-1}`)
+		r := v.Process(bad, FailFast)
+		if r.Valid {
+			t.Fatal("valid = true, want false")
+		}
+		if len(r.Errors) != 1 {
+			t.Fatalf("errors = %d, want 1 under FailFast: %v", len(r.Errors), r.Errors)
+		}
+	})
+
+	t.Run("an unsupported type names what it got and what it wanted", func(t *testing.T) {
+		// This is the cost of accepting any: a type error that the compiler used
+		// to catch now surfaces here. The message has to carry its weight.
+		for _, in := range []any{42, "str", []int{1}, 3.14, true} {
+			r := v.Process(in)
+			if r.Valid {
+				t.Fatalf("%T: valid = true, want false", in)
+			}
+			if !r.HasCode(CodeConfigError) {
+				t.Fatalf("%T: codes = %v, want %s", in, r.Errors, CodeConfigError)
+			}
+			msg := r.Errors[0].Message
+			if !strings.Contains(msg, "unsupported input type") {
+				t.Errorf("%T: message = %q, want it to say the type is unsupported", in, msg)
+			}
+			if !strings.Contains(msg, "map[string]any") {
+				t.Errorf("%T: message = %q, want it to list the accepted types", in, msg)
+			}
+		}
+	})
+
+	t.Run("nil is rejected", func(t *testing.T) {
+		r := v.Process(nil)
+		if r.Valid {
+			t.Fatal("valid = true, want false")
+		}
+		if !r.HasCode(CodeConfigError) {
+			t.Fatalf("codes = %v, want %s", r.Errors, CodeConfigError)
+		}
+	})
+}
+
+// valueOrder and processableOrder back the input-type table above.
+type valueOrder struct {
+	OrderID string `json:"order_id"`
+	Amount  int64  `json:"amount"`
+}
+
+type processableOrder struct {
+	id     string
+	amount int64
+}
+
+func (p processableOrder) ToMap() map[string]any {
+	return map[string]any{"order_id": p.id, "amount": p.amount}
 }

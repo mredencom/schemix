@@ -229,7 +229,7 @@ func recordSpanResult(span trace.Span, result *Result, schemaName string, mode F
 			span.AddEvent("validation_error", trace.WithAttributes(
 				attribute.String("schemix.error.code", string(e.Code)),
 				attribute.String("schemix.error.path", e.Path),
-				attribute.String("schemix.error.type", e.Type),
+				attribute.String("schemix.error.type", string(e.Type)),
 			))
 		}
 	}

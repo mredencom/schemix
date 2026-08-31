@@ -57,7 +57,7 @@ func ExampleResult_ErrorsByType() {
 		memo:   string @blob(this.memo.len_between(min: 5, max: 100))
 	}`)
 
-	r := v.ProcessWithMode(map[string]any{"amount": int64(-1), "memo": "hi"}, schemix.FailAll)
+	r := v.Process(map[string]any{"amount": int64(-1), "memo": "hi"})
 
 	fmt.Println("cue errors:     ", len(r.ErrorsByType(schemix.TypeCUE)))
 	fmt.Println("bloblang errors:", len(r.ErrorsByType(schemix.TypeBloblang)))
@@ -86,17 +86,17 @@ func ExampleResult_FirstError() {
 // An enum violation names every accepted value and suggests the closest match.
 // Suggestion is populated for enums only — a range or regex violation has no
 // meaningful value to guess.
-func ExampleValidationError_FriendlyMessage() {
+func ExampleLocalizer_enumSuggestion() {
 	v := schemix.MustNew(`{ currency: "CNY" | "USD" | "EUR" }`)
 
 	r := v.Process(map[string]any{"currency": "USE"})
 	e := r.Errors[0]
 
 	fmt.Println("suggestion:", e.Suggestion)
-	fmt.Println("friendly:  ", e.FriendlyMessage())
+	fmt.Println("localized: ", schemix.EnUS.Localize(e))
 	// Output:
 	// suggestion: USD
-	// friendly:   currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
+	// localized:  currency must be one of ["CNY", "USD", "EUR"] — did you mean "USD"?
 }
 
 // WithErrorFormatter rewrites Message, the diagnostic meant for logs. Use it to
@@ -117,7 +117,7 @@ func ExampleWithErrorFormatter() {
 		},
 	))
 
-	r := v.ProcessWithMode(map[string]any{"age": int64(200), "currency": "JPY"}, schemix.FailAll)
+	r := v.Process(map[string]any{"age": int64(200), "currency": "JPY"})
 	for _, e := range r.Errors {
 		fmt.Println(e.Message)
 	}

@@ -2,15 +2,18 @@ package schemix
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
+	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
-// helper: compile bloblang mapping and execute against data.
-func execMapping(t *testing.T, mapping string, data map[string]any) map[string]any {
+// helper: compile bloblang mapping in env and execute against data.
+func execMapping(t *testing.T, env *bloblang.Environment, mapping string, data map[string]any) map[string]any {
 	t.Helper()
-	exec, err := bloblang.Parse(mapping)
+	exec, err := env.Parse(mapping)
 	if err != nil {
 		t.Fatalf("parse mapping: %v", err)
 	}
@@ -25,10 +28,21 @@ func execMapping(t *testing.T, mapping string, data map[string]any) map[string]a
 	return m
 }
 
+// newTestEnv returns a Bloblang environment scoped to this test, released on
+// cleanup so the ownership claim does not leak into the next one.
+//
+// Tests used to register into the process-global environment, which made them
+// share one namespace and one ownership claim — an implicit ordering
+// dependency. A per-test environment removes it.
+func newTestEnv(t *testing.T) *bloblang.Environment {
+	t.Helper()
+	env := bloblang.NewEnvironment()
+	t.Cleanup(func() { releaseEnv(env) })
+	return env
+}
+
 func setupRegistry(t *testing.T) *Registry {
 	t.Helper()
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
 	if err := reg.Register("test_schema", `{
 		name: string
@@ -53,12 +67,13 @@ func setupRegistry(t *testing.T) *Registry {
 
 func TestMethodValidateSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -67,12 +82,13 @@ func TestMethodValidateSchema_Valid(t *testing.T) {
 
 func TestMethodValidateSchema_Invalid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(200)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -85,13 +101,14 @@ func TestMethodValidateSchema_Invalid(t *testing.T) {
 
 func TestMethodValidateSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	// Use fast mode — should still work, returning at most 1 error
 	data := map[string]any{"name": 123, "age": int64(200)}
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema", mode: "fast")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -107,14 +124,15 @@ func TestMethodValidateSchema_WithMode(t *testing.T) {
 
 func TestMethodProcessSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "6222021234567890", "amount": int64(10000), "currency": "156",
 	}
-	r := execMapping(t, `root = this.process_schema(name: "payment")`, data)
+	r := execMapping(t, env, `root = this.process_schema(name: "payment")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -130,14 +148,15 @@ func TestMethodProcessSchema_Valid(t *testing.T) {
 
 func TestMethodProcessSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "invalid", "amount": int64(-1), "currency": "999",
 	}
-	r := execMapping(t, `root = this.process_schema(name: "payment", mode: "fast")`, data)
+	r := execMapping(t, env, `root = this.process_schema(name: "payment", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -155,12 +174,13 @@ func TestMethodProcessSchema_WithMode(t *testing.T) {
 
 func TestFunctionValidateSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -169,12 +189,13 @@ func TestFunctionValidateSchema_Valid(t *testing.T) {
 
 func TestFunctionValidateSchema_Invalid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(200)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -183,12 +204,13 @@ func TestFunctionValidateSchema_Invalid(t *testing.T) {
 
 func TestFunctionValidateSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{"name": 123, "age": int64(200)}
-	r := execMapping(t, `root = validate_schema(data: this, name: "test_schema", mode: "fast")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this, name: "test_schema", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -204,14 +226,15 @@ func TestFunctionValidateSchema_WithMode(t *testing.T) {
 
 func TestFunctionProcessSchema_Valid(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "6222021234567890", "amount": int64(10000), "currency": "156",
 	}
-	r := execMapping(t, `root = process_schema(data: this, name: "payment")`, data)
+	r := execMapping(t, env, `root = process_schema(data: this, name: "payment")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true, got %v", r["valid"])
@@ -227,14 +250,15 @@ func TestFunctionProcessSchema_Valid(t *testing.T) {
 
 func TestFunctionProcessSchema_WithMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
 	data := map[string]any{
 		"pan": "invalid", "amount": int64(-1), "currency": "999",
 	}
-	r := execMapping(t, `root = process_schema(data: this, name: "payment", mode: "fast")`, data)
+	r := execMapping(t, env, `root = process_schema(data: this, name: "payment", mode: "fast")`, data)
 
 	if r["valid"] != false {
 		t.Errorf("expected valid=false, got %v", r["valid"])
@@ -252,7 +276,8 @@ func TestFunctionProcessSchema_WithMode(t *testing.T) {
 
 func TestFunctionDynamicDataParam(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterFunctions(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterFunctionsTo(env); err != nil {
 		t.Fatalf("register functions: %v", err)
 	}
 
@@ -260,7 +285,7 @@ func TestFunctionDynamicDataParam(t *testing.T) {
 	data := map[string]any{
 		"payload": map[string]any{"name": "Bob", "age": int64(25)},
 	}
-	r := execMapping(t, `root = validate_schema(data: this.payload, name: "test_schema")`, data)
+	r := execMapping(t, env, `root = validate_schema(data: this.payload, name: "test_schema")`, data)
 
 	if r["valid"] != true {
 		t.Errorf("expected valid=true with dynamic data, got %v", r["valid"])
@@ -271,20 +296,21 @@ func TestFunctionDynamicDataParam(t *testing.T) {
 
 func TestRegisterAll(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterAll(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterAllTo(env); err != nil {
 		t.Fatalf("register all: %v", err)
 	}
 
 	data := map[string]any{"name": "Alice", "age": int64(30)}
 
 	// Method should work
-	r := execMapping(t, `root = this.validate_schema(name: "test_schema")`, data)
+	r := execMapping(t, env, `root = this.validate_schema(name: "test_schema")`, data)
 	if r["valid"] != true {
 		t.Errorf("method: expected valid=true, got %v", r["valid"])
 	}
 
 	// Function should work
-	r = execMapping(t, `root = validate_schema(data: this, name: "test_schema")`, data)
+	r = execMapping(t, env, `root = validate_schema(data: this, name: "test_schema")`, data)
 	if r["valid"] != true {
 		t.Errorf("function: expected valid=true, got %v", r["valid"])
 	}
@@ -294,12 +320,12 @@ func TestRegisterAll(t *testing.T) {
 
 func TestInvalidMode(t *testing.T) {
 	reg := setupRegistry(t)
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
 	// Invalid mode now causes a construction-time error (E0C01 contract)
-	env := bloblang.GlobalEnvironment()
 	_, err := env.Parse(`root = this.validate_schema(name: "test_schema", mode: "invalid")`)
 	if err == nil {
 		t.Fatal("expected error from mapping construction with invalid mode, got nil")
@@ -307,14 +333,13 @@ func TestInvalidMode(t *testing.T) {
 }
 
 func TestUnregisteredSchema(t *testing.T) {
-	releaseEnv(globalBloblangEnvironment)
-	t.Cleanup(func() { releaseEnv(globalBloblangEnvironment) })
 	reg := NewRegistry()
-	if err := reg.RegisterMethods(); err != nil {
+	env := newTestEnv(t)
+	if err := reg.RegisterMethodsTo(env); err != nil {
 		t.Fatalf("register methods: %v", err)
 	}
 
-	exec, err := bloblang.Parse(`root = this.validate_schema(name: "nonexistent")`)
+	exec, err := env.Parse(`root = this.validate_schema(name: "nonexistent")`)
 	if err == nil {
 		// If parse succeeded, the error should come at runtime
 		_, err = exec.Query(map[string]any{"x": 1})
@@ -393,4 +418,287 @@ func TestRegistry_Len(t *testing.T) {
 	if reg.Len() != 1 {
 		t.Errorf("expected Len()=1 after unregister, got %d", reg.Len())
 	}
+}
+
+// TestRegisterWithOptions covers P0-a: Register accepts construction options.
+//
+// Before this, Registry.Register had no way to pass a construction Option, so a
+// schema registered for a Benthos pipeline could not use custom Bloblang
+// functions — the two features were mutually exclusive. That was the only
+// outright functional gap in the API, not merely an ergonomic one.
+func TestRegisterWithOptions(t *testing.T) {
+	t.Run("custom method reaches the Bloblang plugin", func(t *testing.T) {
+		reg := NewRegistry()
+		// is_allowed_bin returns bool, so it is a validation rule; brand
+		// returns a string, so it is a computed field. Exercising both proves
+		// the custom method is visible on each path.
+		err := reg.Register("payment", `{
+			pan:    string
+			bin_ok: bool   @blob(this.pan.is_allowed_bin())
+			brand:  string @blob(if this.pan.is_allowed_bin() { "UnionPay" } else { "other" })
+		}`, WithMethod("is_allowed_bin", func(v any) (any, error) {
+			s, _ := v.(string)
+			return len(s) > 2 && s[:2] == "62", nil
+		}))
+		if err != nil {
+			t.Fatalf("Register with WithMethod: %v", err)
+		}
+
+		env := bloblang.NewEnvironment()
+		t.Cleanup(func() { releaseEnv(env) })
+		if err := reg.RegisterAllTo(env); err != nil {
+			t.Fatalf("RegisterAllTo: %v", err)
+		}
+		exec, err := env.Parse(`root = this.process_schema(name: "payment")`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+
+		query := func(t *testing.T, pan string) map[string]any {
+			t.Helper()
+			got, err := exec.Query(map[string]any{"pan": pan})
+			if err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			result, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("result type = %T, want map[string]any", got)
+			}
+			return result
+		}
+
+		// The negative case is what proves the method actually ran. A skipped
+		// rule would also leave valid == true, so the accepting case alone
+		// cannot distinguish "method works" from "method never called".
+		rejected := query(t, "4111111111111111")
+		if rejected["valid"] != false {
+			t.Fatalf("valid = %v for a non-62 pan, want false; the custom method did not run",
+				rejected["valid"])
+		}
+
+		accepted := query(t, "6212345678901234")
+		if accepted["valid"] != true {
+			t.Fatalf("valid = %v, want true (errors: %v)", accepted["valid"], accepted["errors"])
+		}
+		output, ok := accepted["output"].(map[string]any)
+		if !ok {
+			t.Fatalf("output type = %T, want map[string]any", accepted["output"])
+		}
+		if output["brand"] != "UnionPay" {
+			t.Fatalf("output[brand] = %v, want %q", output["brand"], "UnionPay")
+		}
+	})
+
+	t.Run("registry name wins over WithName", func(t *testing.T) {
+		// The registry key must be what labels metrics: a validator filed under
+		// "canonical" that reports itself as "impostor" makes the metric
+		// impossible to correlate with the schema it came from.
+		rec := &fakeRecorder{}
+		reg := NewRegistry()
+		err := reg.Register("canonical", `{value: string}`,
+			WithName("impostor"),
+			WithMetricsRecorder(rec),
+		)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		v, ok := reg.Get("canonical")
+		if !ok {
+			t.Fatal("Get(canonical) = false, want true")
+		}
+		v.Validate(map[string]any{"value": "ok"})
+
+		if len(rec.validationCalls) != 1 {
+			t.Fatalf("ObserveValidation calls = %d, want 1", len(rec.validationCalls))
+		}
+		if got := rec.validationCalls[0].schemaName; got != "canonical" {
+			t.Fatalf("schemaName = %q, want %q (the registry key must win)", got, "canonical")
+		}
+	})
+
+	t.Run("option error is wrapped with the name", func(t *testing.T) {
+		reg := NewRegistry()
+		// An invalid custom name fails at construction; Register must surface
+		// that rather than storing a broken validator.
+		err := reg.Register("bad", `{value: string}`,
+			WithMethod("NotSnakeCase", func(any) (any, error) { return true, nil }),
+		)
+		if err == nil {
+			t.Fatal("Register with an invalid option = nil error, want failure")
+		}
+		if !strings.Contains(err.Error(), `register "bad"`) {
+			t.Fatalf("error = %q, want it to name the registration", err)
+		}
+		if reg.Has("bad") {
+			t.Fatal(`Has("bad") = true; a failed Register must not store anything`)
+		}
+	})
+
+	t.Run("does not mutate the caller's option slice", func(t *testing.T) {
+		// Register appends WithName internally. Doing that on the caller's
+		// backing array would overwrite whatever follows the passed slice —
+		// the classic append-aliasing trap.
+		opts := make([]Option, 1, 4)
+		opts[0] = WithMetricsRecorder(&fakeRecorder{})
+		sentinel := WithName("sentinel-must-survive")
+		full := opts[:2:4]
+		full[1] = sentinel
+
+		reg := NewRegistry()
+		if err := reg.Register("aliasing", `{value: string}`, opts...); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		// full[1] must still be the sentinel, not Register's internal WithName.
+		probe := &validatorConfig{}
+		full[1](probe)
+		if probe.schemaName != "sentinel-must-survive" {
+			t.Fatalf("caller's slice was overwritten: schemaName = %q, want %q",
+				probe.schemaName, "sentinel-must-survive")
+		}
+	})
+
+	t.Run("no options behaves as before", func(t *testing.T) {
+		reg := NewRegistry()
+		if err := reg.Register("plain", `{value: string}`); err != nil {
+			t.Fatalf("Register without options: %v", err)
+		}
+		v, ok := reg.Get("plain")
+		if !ok {
+			t.Fatal("Get(plain) = false, want true")
+		}
+		if valid, errs := v.Validate(map[string]any{"value": "ok"}); !valid {
+			t.Fatalf("Validate = false, errs = %v", errs)
+		}
+	})
+}
+
+// TestPut covers P0-b: storing an already-constructed validator.
+//
+// Register builds from CUE source, which leaves no way to put a validator that
+// was built any other way into a registry — NewFromValue with shared
+// definitions, or one sharing a FuncMap with its siblings. Put closes that gap.
+func TestPut(t *testing.T) {
+	t.Run("stored validator is retrievable", func(t *testing.T) {
+		reg := NewRegistry()
+		v := MustNew(`{value: string}`)
+		if err := reg.Put("direct", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		got, ok := reg.Get("direct")
+		if !ok {
+			t.Fatal("Get = false, want true")
+		}
+		if got != v {
+			t.Fatal("Get returned a different validator than the one stored")
+		}
+		if !reg.Has("direct") {
+			t.Fatal("Has = false, want true")
+		}
+		if !slices.Contains(reg.List(), "direct") {
+			t.Fatalf("List = %v, want it to contain %q", reg.List(), "direct")
+		}
+	})
+
+	t.Run("stored validator reaches the Bloblang plugin", func(t *testing.T) {
+		// This is the point of Put: a validator built from a pre-compiled CUE
+		// value can now serve a Benthos pipeline.
+		ctx := cuecontext.New()
+		defs := ctx.CompileString(`#Pan: =~"^[0-9]{16}$"`)
+		schema := ctx.CompileString(`{pan: #Pan}`, cue.Scope(defs))
+		v, err := NewFromValue(schema)
+		if err != nil {
+			t.Fatalf("NewFromValue: %v", err)
+		}
+
+		reg := NewRegistry()
+		if err := reg.Put("composed", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		env := bloblang.NewEnvironment()
+		t.Cleanup(func() { releaseEnv(env) })
+		if err := reg.RegisterAllTo(env); err != nil {
+			t.Fatalf("RegisterAllTo: %v", err)
+		}
+		exec, err := env.Parse(`root = this.validate_schema(name: "composed")`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+
+		for _, tc := range []struct {
+			pan  string
+			want bool
+		}{
+			{"6212345678901234", true},
+			{"not-a-pan", false},
+		} {
+			got, err := exec.Query(map[string]any{"pan": tc.pan})
+			if err != nil {
+				t.Fatalf("query %q: %v", tc.pan, err)
+			}
+			result, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("result type = %T, want map[string]any", got)
+			}
+			if result["valid"] != tc.want {
+				t.Fatalf("pan %q: valid = %v, want %v", tc.pan, result["valid"], tc.want)
+			}
+		}
+	})
+
+	t.Run("nil validator is rejected", func(t *testing.T) {
+		// Storing nil would make Get return (nil, true), and the Bloblang
+		// plugin calls the returned validator without a nil check — the panic
+		// would surface inside a pipeline, far from this call.
+		reg := NewRegistry()
+		if err := reg.Put("empty", nil); err == nil {
+			t.Fatal("Put(nil) = nil error, want failure")
+		}
+		if reg.Has("empty") {
+			t.Fatal("a rejected Put must not store anything")
+		}
+	})
+
+	t.Run("replaces an existing entry", func(t *testing.T) {
+		// Same semantics as Register, which also overwrites.
+		reg := NewRegistry()
+		first := MustNew(`{value: string}`)
+		second := MustNew(`{value: int}`)
+		if err := reg.Put("dup", first); err != nil {
+			t.Fatalf("first Put: %v", err)
+		}
+		if err := reg.Put("dup", second); err != nil {
+			t.Fatalf("second Put: %v", err)
+		}
+		got, _ := reg.Get("dup")
+		if got != second {
+			t.Fatal("Get did not return the most recently stored validator")
+		}
+		if reg.Len() != 1 {
+			t.Fatalf("Len = %d, want 1", reg.Len())
+		}
+	})
+
+	t.Run("does not relabel metrics with the registry key", func(t *testing.T) {
+		// A known and deliberate limitation: a Validator is immutable after
+		// construction, so unlike Register — which forces WithName(name) — Put
+		// cannot make the metrics label agree with the registry key. Callers
+		// who need them to agree must pass WithName themselves. This test pins
+		// the behaviour so the limitation cannot drift unnoticed.
+		rec := &fakeRecorder{}
+		v := MustNew(`{value: string}`, WithMetricsRecorder(rec), WithName("built-as"))
+		reg := NewRegistry()
+		if err := reg.Put("filed-as", v); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		v.Validate(map[string]any{"value": "ok"})
+
+		if len(rec.validationCalls) != 1 {
+			t.Fatalf("ObserveValidation calls = %d, want 1", len(rec.validationCalls))
+		}
+		if got := rec.validationCalls[0].schemaName; got != "built-as" {
+			t.Fatalf("schemaName = %q, want %q: Put must not rewrite it", got, "built-as")
+		}
+	})
 }

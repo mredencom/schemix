@@ -17,11 +17,6 @@ type Registry struct {
 	cueCtx     *cue.Context // shared CUE context for all validators in this registry
 }
 
-// globalBloblangEnvironment is a stable wrapper around Bento's process-global
-// Bloblang environment. Bento returns a new wrapper from GlobalEnvironment on
-// each call, so schemix must retain one pointer for ownership enforcement.
-var globalBloblangEnvironment = bloblang.GlobalEnvironment()
-
 // NewRegistry creates an empty validator registry with a shared CUE context.
 func NewRegistry() *Registry {
 	return &Registry{
@@ -32,10 +27,63 @@ func NewRegistry() *Registry {
 
 // Register compiles and stores a named validator from a CUE schema string.
 // It uses the registry's shared CUE context for efficient memory usage.
-func (r *Registry) Register(name, cueSrc string) error {
-	v, err := NewWithContext(r.cueCtx, cueSrc, WithName(name))
+//
+// Construction options are forwarded to the validator, so a schema exposed to a
+// Benthos pipeline can also use custom Bloblang functions, a metrics recorder,
+// or a localizer:
+//
+//	reg.Register("payment", src, schemix.WithMethod("is_allowed_bin", fn))
+//
+// WithName is applied last and therefore cannot be overridden: the registry key
+// is what labels metrics, so a validator filed under one name must not report
+// itself under another.
+//
+// Nothing is stored if construction fails.
+func (r *Registry) Register(name, cueSrc string, opts ...Option) error {
+	v, err := NewWithContext(r.cueCtx, cueSrc, withRegistryName(name, opts)...)
 	if err != nil {
 		return fmt.Errorf("register %q: %w", name, err)
+	}
+	r.mu.Lock()
+	r.validators[name] = v
+	r.mu.Unlock()
+	return nil
+}
+
+// withRegistryName returns opts followed by WithName(name), without writing
+// into the caller's backing array.
+//
+// Appending to opts directly would be a bug: a caller passing a slice with
+// spare capacity (reg.Register(n, src, myOpts...)) would have the element after
+// myOpts silently overwritten. The explicit allocation is sized exactly, so it
+// costs one allocation per registration — irrelevant next to compiling a
+// schema.
+func withRegistryName(name string, opts []Option) []Option {
+	all := make([]Option, 0, len(opts)+1)
+	all = append(all, opts...)
+	return append(all, WithName(name))
+}
+
+// Put stores an already-constructed validator under the given name, replacing
+// any existing entry.
+//
+// Register builds from CUE source, which leaves no way to file a validator that
+// was built any other way — one from NewFromValue with shared definitions, or
+// one sharing a FuncMap with its siblings:
+//
+//	v, _ := schemix.NewFromValue(schema)
+//	reg.Put("composed", v)
+//
+// Unlike Register, Put cannot make the validator's metrics label agree with the
+// registry key, because a Validator is immutable once constructed. Pass
+// WithName yourself if the two need to match.
+//
+// A nil validator is rejected: storing one would make Get return (nil, true),
+// and the Bloblang plugins call what Get returns without a nil check, so the
+// panic would surface inside a pipeline rather than here.
+func (r *Registry) Put(name string, v *Validator) error {
+	if v == nil {
+		return fmt.Errorf("put %q: nil validator", name)
 	}
 	r.mu.Lock()
 	r.validators[name] = v
@@ -142,14 +190,6 @@ func (r *Registry) RegisterAllTo(env *bloblang.Environment) error {
 	return r.registerFunctionsTo(env)
 }
 
-// RegisterMethods registers "validate_schema" and "process_schema"
-// Bloblang methods into the global environment.
-//
-// Deprecated: Use RegisterMethodsTo with an explicit environment.
-func (r *Registry) RegisterMethods() error {
-	return r.RegisterMethodsTo(globalBloblangEnvironment)
-}
-
 // registerMethodsTo performs the actual method registration into a given env.
 func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 	// validate_schema method
@@ -177,7 +217,7 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 				return nil, err
 			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
 			}), nil
 		},
@@ -210,7 +250,7 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 				return nil, err
 			}
 			return bloblang.ObjectMethod(func(obj map[string]any) (any, error) {
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
 			}), nil
 		},
@@ -219,14 +259,6 @@ func (r *Registry) registerMethodsTo(env *bloblang.Environment) error {
 	}
 
 	return nil
-}
-
-// RegisterFunctions registers "validate_schema" and "process_schema"
-// as Bloblang functions into the global environment.
-//
-// Deprecated: Use RegisterFunctionsTo with an explicit environment.
-func (r *Registry) RegisterFunctions() error {
-	return r.RegisterFunctionsTo(globalBloblangEnvironment)
 }
 
 // registerFunctionsTo performs the actual function registration into a given env.
@@ -269,7 +301,7 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 				if !ok {
 					return nil, fmt.Errorf("%s: data param must be an object, got %T", pluginValidateSchema, dataRaw)
 				}
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, nil), nil
 			}, nil
 		},
@@ -315,7 +347,7 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 				if !ok {
 					return nil, fmt.Errorf("%s: data param must be an object, got %T", pluginProcessSchema, dataRaw)
 				}
-				result := v.ProcessWithMode(obj, mode)
+				result := v.processMap(obj, mode)
 				return resultToMap(result.Valid, result.Errors, result.Output), nil
 			}, nil
 		},
@@ -324,14 +356,6 @@ func (r *Registry) registerFunctionsTo(env *bloblang.Environment) error {
 	}
 
 	return nil
-}
-
-// RegisterAll registers both method and function forms of validate_schema and
-// process_schema into the global environment.
-//
-// Deprecated: Use RegisterAllTo with an explicit environment.
-func (r *Registry) RegisterAll() error {
-	return r.RegisterAllTo(globalBloblangEnvironment)
 }
 
 // Plugin names registered with Bloblang.
