@@ -12,7 +12,7 @@ import "fmt"
 // reach that state.
 //
 // FailAll is the zero value, so an unset FailMode field means "collect
-// everything" — schemix/testing relies on this.
+// everything" — schemixtest relies on this.
 type FailMode struct{ n uint8 }
 
 var (

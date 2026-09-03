@@ -220,7 +220,7 @@ func funcKey(fn *ast.FuncDecl) string {
 //
 // It lands in P0 because the Deprecated markers have to point at something that
 // actually exists: without it there is no non-deprecated way to pass a FailMode,
-// and schemix/testing — a separate package — cannot reach an unexported helper.
+// and schemixtest — a separate package — cannot reach an unexported helper.
 // Adding a variadic parameter keeps every existing call compiling.
 func TestCallOption(t *testing.T) {
 	const schema = `{
