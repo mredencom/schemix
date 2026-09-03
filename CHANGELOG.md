@@ -42,6 +42,10 @@ Why each group went:
 
 ### Breaking Changes
 
+Import path change:
+
+- **The test helper package moved from `github.com/mredencom/schemix/testing` to `github.com/mredencom/schemix/schemixtest`**, and its package name changed from `schemix` to `schemixtest`. The old layout had a directory named after the standard library's `testing` while declaring `package schemix`, so it collided with the root package name and every importer was forced to invent a local alias — the package doc spent half its length explaining that. The new name follows the `net/http/httptest` convention and matches the `schemixprom` / `schemixotel` prefix already used by the sibling modules. `Test`, `TestCase` and every field on it are unchanged.
+
 Signature and type changes to symbols that still exist:
 
 - **`Process`, `ProcessContext`, `Validate` and `ValidateContext` take `data any`** instead of `map[string]any`, and accept `opts ...CallOption`. Passing a map still compiles. Passing something unsupported — `map[string]string` and `map[string]int` are the realistic cases — now fails at runtime with `E0C01` where the compiler used to object; the message names the type it received and lists the accepted ones.
@@ -64,6 +68,7 @@ Validation-behaviour changes:
 ### Migration
 | Change | Required action |
 |--------|-----------------|
+| Test helper package renamed | Replace `schemixtest "github.com/mredencom/schemix/testing"` with `"github.com/mredencom/schemix/schemixtest"`. The alias is no longer needed; call sites keep using `schemixtest.Test` / `schemixtest.TestCase` unchanged. |
 | Unrepresentable constraint now enforced | None for correct data. Input that violated a previously dropped conjunct now fails, which is the intended verdict; the affected field costs more than a fast-path field because CUE decides it. |
 | Integer value on a `float` field (`E1T01`) | Declare the field `number` if it should accept both, or pass a Go float (`50.0`, not `50`). |
 | Attribute inside an array element | Move it to the array field itself: `items: [...{qty: int}] @blob(this.items.all(i -> i.qty > 0))`. Computed element fields must be declared optional (`subtotal?: number`) because CUE runs before `@blob`. |

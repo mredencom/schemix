@@ -1,12 +1,12 @@
-package schemix
+package schemixtest
 
 import (
 	"testing"
 
-	root "github.com/mredencom/schemix"
+	"github.com/mredencom/schemix"
 )
 
-var visaSchema = root.MustNew(`{
+var visaSchema = schemix.MustNew(`{
 	pan:    =~"^[0-9]{16}$"
 	amount: int & >0
 	luhn:   bool @blob(this.pan.luhn_valid())
@@ -39,7 +39,7 @@ func TestTest_ValidAndInvalidCases(t *testing.T) {
 				"amount": int64(10000),
 			},
 			WantValid: false,
-			WantCode:  root.CodeBizRuleFailed,
+			WantCode:  schemix.CodeBizRuleFailed,
 			WantPath:  "luhn",
 		},
 		{
@@ -48,7 +48,7 @@ func TestTest_ValidAndInvalidCases(t *testing.T) {
 				"pan": "4111111111111111",
 			},
 			WantValid:      false,
-			WantCode:       root.CodeRequiredMissing,
+			WantCode:       schemix.CodeRequiredMissing,
 			WantErrorCount: &count1,
 		},
 		{
@@ -58,7 +58,7 @@ func TestTest_ValidAndInvalidCases(t *testing.T) {
 				"amount": int64(500),
 			},
 			WantValid: true,
-			Check: func(t *testing.T, result root.Result) {
+			Check: func(t *testing.T, result schemix.Result) {
 				if result.Output["brand"] != "Visa" {
 					t.Errorf("brand = %v, want Visa", result.Output["brand"])
 				}
@@ -80,7 +80,7 @@ func TestTest_MultipleAssertionsAllReported(t *testing.T) {
 				"amount": int64(10000),
 			},
 			WantValid: false,
-			WantCode:  root.CodeBizRuleFailed,
+			WantCode:  schemix.CodeBizRuleFailed,
 			WantPath:  "luhn",
 		},
 	})

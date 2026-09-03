@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// TestFailAllIsTheZeroValue pins a contract the schemix/testing package depends
+// TestFailAllIsTheZeroValue pins a contract the schemixtest package depends
 // on: TestCase.Mode is a plain field, so an unset one must mean FailAll.
 func TestFailAllIsTheZeroValue(t *testing.T) {
 	var zero FailMode

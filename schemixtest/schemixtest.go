@@ -1,19 +1,12 @@
-// Package testing (import path ".../schemix/testing", package name "schemix")
-// provides a table-driven test helper for schemix.Validator.
+// Package schemixtest provides a table-driven test helper for
+// schemix.Validator, in the spirit of net/http/httptest.
 //
-// It is meant to be used from your own *_test.go files via an aliased import:
-//
-//	import schemixtest "github.com/mredencom/schemix/testing"
-//
-// or, since the package name is "schemix", side-by-side with the root
-// package under a distinct local name to avoid collisions:
+// It is meant to be used from your own *_test.go files:
 //
 //	import (
 //	    "github.com/mredencom/schemix"
-//	    schemixtest "github.com/mredencom/schemix/testing"
+//	    "github.com/mredencom/schemix/schemixtest"
 //	)
-//
-// Example:
 //
 //	v := schemix.MustNew(`{
 //	    pan:  =~"^[0-9]{16}$"
@@ -32,13 +25,17 @@
 //	        WantCode: schemix.CodeBizRuleFailed,
 //	    },
 //	})
-package schemix
+//
+// It lives in its own package rather than in the root one so that the standard
+// library testing package stays out of the import graph of any production
+// binary that depends on schemix.
+package schemixtest
 
 import (
 	"reflect"
 	"testing"
 
-	root "github.com/mredencom/schemix"
+	"github.com/mredencom/schemix"
 )
 
 // TestCase describes a single table-driven test scenario for a Validator.
@@ -55,7 +52,7 @@ type TestCase struct {
 
 	// Mode selects the FailMode used for this case. Zero value is
 	// schemix.FailAll, which is also the default used by Validator.Process.
-	Mode root.FailMode
+	Mode schemix.FailMode
 
 	// WantValid asserts result.Valid == WantValid.
 	//
@@ -73,12 +70,12 @@ type TestCase struct {
 
 	// WantCode, when non-empty, asserts that result.Errors contains at least
 	// one error with this ErrorCode (via Result.HasCode). Leave empty to skip.
-	WantCode root.ErrorCode
+	WantCode schemix.ErrorCode
 
 	// WantCodes, when non-empty, asserts that result.Errors contains at least
 	// one error for every code listed (via Result.HasCode). Use this instead
 	// of WantCode when a case is expected to fail more than one rule.
-	WantCodes []root.ErrorCode
+	WantCodes []schemix.ErrorCode
 
 	// WantErrorCount, when non-nil, asserts len(result.Errors) == *WantErrorCount.
 	// Use a pointer so zero (0 errors, i.e. valid case) can be asserted
@@ -93,7 +90,7 @@ type TestCase struct {
 	// built-in assertions above have run. Use it for assertions that don't
 	// fit the declarative fields (e.g. inspecting a specific computed value,
 	// or a custom error message check).
-	Check func(t *testing.T, result root.Result)
+	Check func(t *testing.T, result schemix.Result)
 }
 
 // Test runs each TestCase as a subtest via t.Run(tc.Name, ...), processing
@@ -102,7 +99,7 @@ type TestCase struct {
 // It fails (via t.Errorf) rather than aborting (t.Fatalf) on individual
 // mismatches, so a single subtest reports every violated expectation instead
 // of stopping at the first one.
-func Test(t *testing.T, v *root.Validator, cases []TestCase) {
+func Test(t *testing.T, v *schemix.Validator, cases []TestCase) {
 	t.Helper()
 	for _, tc := range cases {
 		tc := tc
@@ -115,7 +112,7 @@ func Test(t *testing.T, v *root.Validator, cases []TestCase) {
 }
 
 // assertResult checks a single Result against a TestCase's expectations.
-func assertResult(t *testing.T, tc TestCase, result root.Result) {
+func assertResult(t *testing.T, tc TestCase, result schemix.Result) {
 	t.Helper()
 
 	if result.Valid != tc.WantValid {
